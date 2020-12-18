@@ -5,13 +5,11 @@ use anyhow::anyhow;
 use std::{
     collections::VecDeque,
     fs,
-    io::Read,
     path::{Path, PathBuf},
     rc::Rc,
     sync::{atomic::{AtomicU32, Ordering}, Arc, mpsc},
     thread,
 };
-use lsx::sha256::BufSha256;
 
 use crate::*;
 
@@ -89,29 +87,20 @@ fn interrogate_file(ent: &fs::DirEntry, fs_metadata: &fs::Metadata,
     // to open it, get metadata, checksum it, etc.
     let mut avf = ffmpeg::AVFormat::open_input(&absolute_path)?;
     avf.find_stream_info()?;
-    let best = avf.find_best_stream()?;
-    let best = match best {
+    let best_stream_id = match avf.find_best_stream()? {
         Some(x) => x,
         None => {
             // TODO: not a music file
             return Ok(())
         }
     };
-    let metadata = avf.read_metadata(Some(best));
+    let metadata = avf.read_metadata(Some(best_stream_id));
+    let duration = avf.estimate_duration(best_stream_id);
     // We've got the metadata from ffmpeg. We're pretty sure at this point that
     // it's a music file. (Or something we can play as one, at least.) Checksum
     // the whole file to get its file ID.
-    let mut f = fs::File::open(&absolute_path)?;
-    let mut hasher = BufSha256::new();
-    let mut buf = [0u8; 16384];
-    loop {
-        match f.read(&mut buf[..])? {
-            0 => break,
-            x => hasher.update(&buf[..x]),
-        }
-    }
-    let checksum = hasher.finish(&[]);
-    physical::scanned_file(&checksum, size, mtime, &relative_path,
+    let fileid = FileID::from_file(fs::File::open(&absolute_path)?)?;
+    physical::scanned_file(&fileid, size, mtime, duration, &relative_path,
                            &absolute_path, metadata)?;
     // Everything went okay. We scanned the file. We got its metadata. It has
     // been added to our physical file database.

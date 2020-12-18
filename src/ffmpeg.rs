@@ -128,6 +128,23 @@ impl AVFormat {
         }
         ret
     }
+    /// Estimates the duration of the given stream, in seconds.
+    pub fn estimate_duration(&mut self, stream: libc::c_int) -> u32 {
+        let inner = unsafe { self.inner.as_ref() }.unwrap();
+        if stream >= 0 && (stream as u32) < inner.nb_streams {
+            let stream_ref = unsafe {
+                inner.streams.offset(stream as isize).read().as_ref()
+                    .unwrap()
+            };
+            // TODO: if no stream duration, use the global duration and
+            // `AV_TIME_BASE`?
+            let num = stream_ref.duration.saturating_mul(stream_ref.time_base.num as i64);
+            let den = stream_ref.time_base.den as i64;
+            ((num + den / 2) / den)
+                .min(u32::MAX as i64).max(0) as u32
+        }
+        else { panic!("invalid stream index: {}", stream); }
+    }
     /// Calls `avformat_close_input`. This gets called automatically if this
     /// context is dropped without being closed.
     pub fn close_input(&mut self) {
