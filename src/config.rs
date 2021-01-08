@@ -230,6 +230,8 @@ impl Update {
 /// guarantees about transactional integrity than simply opening and writing
 /// the file in place. You must call `.finish()` on successful write, or the
 /// changes will be lost.
+///
+/// [1]: struct.Update.html
 pub fn open_for_write(name: &str) -> anyhow::Result<Update> {
     let src = &CONFIG_PATHS[CONFIG_PATHS.len() - 1];
     let mut neu_path = src.to_owned();
