@@ -209,3 +209,21 @@ pub fn scanned_file(id: &FileID, size: u64, _mtime: u64, duration: u32,
     logical::incorporate_physical(id, &record.raw_meta, similarity_rec);
     Ok(())
 }
+
+/// Tries to open this `PhysicalFile` for decoding. Errors will be logged.
+pub fn open_stream(id: &FileID) -> Option<ffmpeg::AVFormat> {
+    let files = PHYSICAL_FILES.read().unwrap();
+    let file = files.get(id)?.read().unwrap();
+    for path in file.absolute_paths.iter() {
+        eprintln!("{:?}?", path);
+        match ffmpeg::AVFormat::open_input(&path) {
+            Ok(x) => return Some(x),
+            Err(x) => {
+                eprintln!("Error opening {:?}: {:?}", path, x);
+                continue
+            }
+        }
+    }
+    eprintln!("no...");
+    None
+}

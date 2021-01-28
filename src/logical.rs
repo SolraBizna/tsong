@@ -93,7 +93,6 @@ impl SimilarityRec {
 /// A *logical song* is a particular performance of a particular song. It may
 /// correspond to multiple *encodings* (different formats, start/end cutoffs,
 /// bitrates...), each of which could be in a different *physical file*.
-#[derive(Debug)]
 pub struct LogicalSong {
     // Stored in database
     id: SongID,
@@ -101,13 +100,6 @@ pub struct LogicalSong {
     physical_files: Vec<FileID>,
     // Not stored in database; populated as the database is loaded
     similarity_recs: Vec<SimilarityRec>,
-}
-
-impl LogicalSong {
-    pub fn get_id(&self) -> SongID { self.id }
-    pub fn get_metadata(&self) -> &BTreeMap<String, String> {
-        &self.user_metadata
-    }
 }
 
 static GENERATION: GenerationTracker = GenerationTracker::new();
@@ -267,3 +259,58 @@ pub fn get_all_songs_for_read()
     let generation = GENERATION.snapshot();
     (lock, generation)
 }
+
+impl LogicalSong {
+    /// Returns the persistent unique ID for this song. (This is unique within
+    /// the same database, not universally.)
+    pub fn get_id(&self) -> SongID { self.id }
+    /// Returns the full set of metadata the user has set for this song.
+    pub fn get_metadata(&self) -> &BTreeMap<String, String> {
+        &self.user_metadata
+    }
+    /// Tries to open a `PhysicalFile` of this song for decoding. Errors will
+    /// be logged.
+    pub fn open_stream(&self) -> Option<ffmpeg::AVFormat> {
+        for id in self.physical_files.iter() {
+            if let Some(x) = physical::open_stream(id) {
+                return Some(x)
+            }
+        }
+        None
+    }
+}
+
+impl Debug for LogicalSong {
+    fn fmt(&self, fmt: &mut Formatter<'_>) -> fmt::Result {
+        write!(fmt, "Song ID #{}", self.id)?;
+        let mut title = self.user_metadata.get("title");
+        let mut artist = self.user_metadata.get("artist");
+        if title.is_none() {
+            for rec in self.similarity_recs.iter() {
+                if rec.title.len() > 0 {
+                    title = Some(&rec.title);
+                    break;
+                }
+            }
+        }
+        if artist.is_none() {
+            for rec in self.similarity_recs.iter() {
+                if rec.artist.len() > 0 {
+                    artist = Some(&rec.artist);
+                    break;
+                }
+            }
+        }
+        match (title, artist) {
+            (Some(title), Some(artist)) =>
+                write!(fmt, ", {}, by {}", title, artist)?,
+            (None, Some(artist)) =>
+                write!(fmt, ", a song by {}", artist)?,
+            (Some(title), None) =>
+                write!(fmt, ", {}", title)?,
+            _ => (),
+        }
+        Ok(())
+    }
+}
+

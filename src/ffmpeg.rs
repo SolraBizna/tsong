@@ -8,6 +8,7 @@ use std::{
     ffi::{CStr, CString},
     path::Path,
     ptr::null_mut,
+    mem::transmute,
 };
 
 /// Turn an FFMPEG error code into an error string.
@@ -65,12 +66,50 @@ fn transcribe_dict(out: &mut BTreeMap<String, String>,
     }
 }
 
-/// Wraps an (input!) AVFormatContext
+/// Wraps an (input!) `AVFormatContext`
 pub struct AVFormat {
+    /// A pointer to the `AVFormatContext` that we're managing, or null if
+    /// we've been closed.
     inner: *mut ff::AVFormatContext,
+    /// A pointer to the `AVCodecContext` we're managing, or null if we haven't
+    /// opened the file for decoding or if we've been closed.
+    codec_ctx: *mut ff::AVCodecContext,
+    /// The last stream opened. Valid if codec_ctx is non-null;
+    stream: libc::c_int,
+    /// A single packet of encoded data from the muxer.
+    packet: ff::AVPacket,
+    /// A single frame—or several frames, for PCM/etc—of decoded data from the
+    /// codec.
+    frame: *mut ff::AVFrame,
 }
 
+/// This can be sent, as long as it's `Sync`ed...
+unsafe impl Send for AVFormat {}
+
 impl AVFormat {
+    fn get_stream_ref(&self, stream: libc::c_int) -> &ff::AVStream {
+        let inner = unsafe { self.inner.as_ref() }.unwrap();
+        if stream < 0 || (stream as u32) > inner.nb_streams {
+            panic!("logic error: invalid stream index: {}", stream);
+        }
+        unsafe {
+            inner.streams.offset(stream as isize).read().as_ref()
+                .expect("null stream?!")
+        }
+    }
+    fn maybe_close_codec(&mut self) {
+        if !self.codec_ctx.is_null() {
+            unsafe {
+                ff::avcodec_free_context(&mut self.codec_ctx);
+            }
+            self.codec_ctx = null_mut();
+        }
+        if !self.frame.is_null() {
+            unsafe {
+                ff::av_frame_free(&mut self.frame)
+            }
+        }
+    }
     /// Calls `avformat_open_input` for the given path.
     pub fn open_input(path: &Path) -> anyhow::Result<AVFormat> {
         let path_str = match path.to_str() {
@@ -85,7 +124,9 @@ impl AVFormat {
                                                   null_mut(),
                                                   null_mut())})?;
         assert!(!inner.is_null());
-        Ok(AVFormat { inner })
+        Ok(AVFormat { inner, codec_ctx: null_mut(), stream: -1,
+                      frame: null_mut(),
+                      packet: unsafe { std::mem::zeroed() } })
     }
     /// Calls `avformat_find_stream_info`.
     pub fn find_stream_info(&mut self) -> anyhow::Result<()> {
@@ -97,6 +138,8 @@ impl AVFormat {
     /// Calls `av_find_best_stream`, to find the best audio stream.
     /// Returns `Ok(Some(n))` if `n` is the best audio stream, `Ok(None)` if
     /// it's not a music file at all, and `Err(...)` if any other error occurs.
+    ///
+    /// Make sure to call `find_stream_info` first.
     pub fn find_best_stream(&mut self) -> anyhow::Result<Option<libc::c_int>> {
         assert!(!self.inner.is_null());
         match unsafe { ff::av_find_best_stream(self.inner,
@@ -106,6 +149,7 @@ impl AVFormat {
             x if x >= 0 => Ok(Some(x)),
             x if x == unsafe { ffdefs::averror_stream_not_found() }
                 => Ok(None),
+            /* TODO: There's got to be a better way */
             x => fferr_lt(x).map(|x| Some(x) /* not reached */),
         }
     }
@@ -117,14 +161,8 @@ impl AVFormat {
         let mut ret = BTreeMap::new();
         transcribe_dict(&mut ret, inner.metadata);
         if let Some(stream) = stream {
-            if stream >= 0 && (stream as u32) < inner.nb_streams {
-                let stream_ref = unsafe {
-                    inner.streams.offset(stream as isize).read().as_ref()
-                };
-                if let Some(stream_ref) = stream_ref {
-                    transcribe_dict(&mut ret, stream_ref.metadata);
-                }
-            }
+            let stream_ref = self.get_stream_ref(stream);
+            transcribe_dict(&mut ret, stream_ref.metadata);
         }
         ret
     }
@@ -143,11 +181,12 @@ impl AVFormat {
             ((num + den / 2) / den)
                 .min(u32::MAX as i64).max(0) as u32
         }
-        else { panic!("invalid stream index: {}", stream); }
+        else { panic!("logic error: invalid stream index: {}", stream); }
     }
     /// Calls `avformat_close_input`. This gets called automatically if this
     /// context is dropped without being closed.
     pub fn close_input(&mut self) {
+        self.maybe_close_codec();
         if !self.inner.is_null() {
             unsafe {
                 ff::avformat_close_input(&mut self.inner);
@@ -155,10 +194,275 @@ impl AVFormat {
             self.inner = null_mut();
         }
     }
+    /// Opens the given audio stream for playback.
+    pub fn open_stream(&mut self, stream: libc::c_int) -> anyhow::Result<()> {
+        self.maybe_close_codec();
+        let stream_ref = self.get_stream_ref(stream);
+        let codecpar = unsafe { stream_ref.codecpar.as_ref().unwrap() };
+        let decoder = unsafe {
+            ff::avcodec_find_decoder(codecpar.codec_id).as_ref()
+        }.ok_or_else(|| anyhow!("opening stream {}, couldn't find decoder",
+                                stream))?;
+        unsafe {
+            /* Somebody told me you couldn't reuse the codec context in the
+             * stream struct. It looks like they were wrong, but here we are.
+             * */
+            let mut nu_ctx = ff::avcodec_alloc_context3(decoder);
+            match ff::avcodec_parameters_to_context(nu_ctx, codecpar) {
+                0 => (),
+                x => {
+                    ff::avcodec_free_context(&mut nu_ctx);
+                    Err(anyhow!("opening stream {}, ffmpeg error {}",
+                                stream, x))?
+                },
+            }
+            self.codec_ctx = nu_ctx;
+            self.stream = stream;
+            ff::av_init_packet(&mut self.packet);
+            match ff::avcodec_open2(self.codec_ctx, decoder, null_mut()) {
+                0 => (),
+                x => {
+                    ff::avcodec_free_context(&mut nu_ctx);
+                    Err(anyhow!("opening stream {}, ffmpeg error {}",
+                                stream, x))?
+                },
+            }
+        }
+        Ok(())
+    }
+    fn decode_from_packet<H>(&mut self, packet: &ff::AVPacket, handler: &mut H)
+    -> anyhow::Result<i32>
+    where H: FnMut(f64, f64, i32, Vec<f32>) {
+        let mut got_frame: libc::c_int = 0;
+        //eprintln!("DECODE!");
+        //eprintln!("Packet: {:?} ... {:?}", self.packet.data, self.packet.size);
+        let len = fferr_lt(unsafe {
+            ff::avcodec_decode_audio4(self.codec_ctx, self.frame,
+                                      &mut got_frame, packet)
+        })?;
+        //eprintln!("DECODED!");
+        if got_frame != 0 {
+            let frame = unsafe { self.frame.as_ref().unwrap() };
+            let _inner = unsafe { self.inner.as_ref().unwrap() };
+            let stream_ref = self.get_stream_ref(self.stream);
+            //eprintln!("{}, {}", frame.pts, inner.start_time);
+            let time = frame.pts //(frame.pts - inner.start_time)
+                .saturating_mul(stream_ref.time_base.num as i64) as f64
+                / (stream_ref.time_base.den as f64);
+            let sample_rate = frame.sample_rate as f64;
+            let channel_count = frame.channels as i32;
+            // TODO: recycle buffers
+            let mut buf = Vec::new();
+            match frame.format {
+                ff::AVSampleFormat_AV_SAMPLE_FMT_U8 =>
+                    expand_packed_audio::<u8>(frame, &mut buf),
+                ff::AVSampleFormat_AV_SAMPLE_FMT_U8P =>
+                    expand_planar_audio::<u8>(frame, &mut buf),
+                ff::AVSampleFormat_AV_SAMPLE_FMT_S16 =>
+                    expand_packed_audio::<i16>(frame, &mut buf),
+                ff::AVSampleFormat_AV_SAMPLE_FMT_S16P =>
+                    expand_planar_audio::<i16>(frame, &mut buf),
+                ff::AVSampleFormat_AV_SAMPLE_FMT_S32 =>
+                    expand_packed_audio::<i32>(frame, &mut buf),
+                ff::AVSampleFormat_AV_SAMPLE_FMT_S32P =>
+                    expand_planar_audio::<i32>(frame, &mut buf),
+                ff::AVSampleFormat_AV_SAMPLE_FMT_S64 =>
+                    expand_packed_audio::<i64>(frame, &mut buf),
+                ff::AVSampleFormat_AV_SAMPLE_FMT_S64P =>
+                    expand_planar_audio::<i64>(frame, &mut buf),
+                ff::AVSampleFormat_AV_SAMPLE_FMT_FLT =>
+                    expand_float_packed_audio(frame, &mut buf),
+                ff::AVSampleFormat_AV_SAMPLE_FMT_FLTP =>
+                    expand_float_planar_audio(frame, &mut buf),
+                ff::AVSampleFormat_AV_SAMPLE_FMT_DBL =>
+                    expand_packed_audio::<f64>(frame, &mut buf),
+                ff::AVSampleFormat_AV_SAMPLE_FMT_DBLP =>
+                    expand_planar_audio::<f64>(frame, &mut buf),
+                x => {
+                    return Err(anyhow!("Unknown AVSampleFormat: {}", x))
+                }
+            }
+            handler(time, sample_rate, channel_count, buf);
+        }
+        Ok(len)
+    }
+    /// Decodes some audio from the current playback position, and advances
+    /// the playback position.
+    ///
+    /// Returns true if there is still more data in the file, or false if it
+    /// has concluded.
+    ///
+    /// Handler parameters:
+    /// 
+    /// - `time`: The time in seconds from the beginning of the song that this
+    ///   decoded data starts at.
+    /// - `sample_rate`: The sample rate of this decoded data. In some formats,
+    ///   this can change mid-stream.
+    /// - `channel_count`: The channel count of this decoded data. 1 = mono,
+    ///   2 = stereo, etc. In some formats, this can change mid-stream.
+    /// - `buf`: Buffer containing packed float audio data.
+    ///
+    /// If there are errors in decoding, playback will stop and the error will
+    /// go into a log somewhere.
+    pub fn decode_some<H>(&mut self, mut handler: H)
+        -> bool
+    where H: FnMut(f64, f64, i32, Vec<f32>)
+    {
+        assert!(!self.inner.is_null());
+        assert!(!self.codec_ctx.is_null());
+        self.packet.data = null_mut();
+        self.packet.size = 0;
+        loop {
+            match unsafe { ff::av_read_frame(self.inner, &mut self.packet)} {
+                0 => (),
+                x => {
+                    if x == unsafe { ffdefs::averror_eof() } {
+                        // End of file. Maybe put out a bit of buffered data?
+                        let packet = self.packet;
+                        match self.decode_from_packet(&packet, &mut handler) {
+                            Ok(_) => (),
+                            Err(x) =>
+                                eprintln!("Error decoding audio: {:?}", x),
+                        };
+                    }
+                    else {
+                        eprintln!("av_read_frame error: {}", x);
+                    }
+                    return false
+                },
+            }
+            if self.packet.stream_index != self.stream {
+                unsafe { ff::av_free_packet(&mut self.packet) }
+                continue
+            }
+            else { break }
+        }
+        if self.frame.is_null() {
+            unsafe {
+                self.frame = ff::av_frame_alloc();
+                if self.frame.is_null() {
+                    eprintln!("av_frame_alloc failed");
+                    return false
+                }
+            }
+        }
+        let mut packet = self.packet;
+        while packet.size > 0 {
+            let len = match self.decode_from_packet(&packet, &mut handler) {
+                Ok(x) => x,
+                Err(x) => {
+                    eprintln!("Error decoding audio: {:?}", x);
+                    return false
+                },
+            };
+            packet.data = unsafe { packet.data.offset(len as isize) };
+            packet.size = packet.size - len;
+        }
+        unsafe { ff::av_free_packet(&mut self.packet) }
+        true
+    }
 }
 
 impl Drop for AVFormat {
     fn drop(&mut self) {
         self.close_input();
     }
+}
+
+fn expand_float_packed_audio(frame: &ff::AVFrame, buf: &mut Vec<f32>){
+    let data_ptr: &[f32] = unsafe {
+        std::slice::from_raw_parts(transmute(frame.extended_data.read()),
+                                   frame.nb_samples as usize
+                                   * frame.channels as usize)
+    };
+    buf.extend_from_slice(data_ptr);
+}
+
+fn expand_float_planar_audio(frame: &ff::AVFrame, buf: &mut Vec<f32>) {
+    assert!(frame.channels > 1);
+    let mut data_ptrs: Vec<&[f32]> = Vec::with_capacity(frame.channels as usize);
+    for c in 0 .. frame.channels as usize {
+        data_ptrs.push(unsafe {
+            let raw_ptr = frame.extended_data.offset(c as isize).read();
+            std::slice::from_raw_parts(transmute(raw_ptr),
+                                       frame.nb_samples as usize)
+        });
+    }
+    for q in 0 .. frame.nb_samples as usize {
+        for c in 0 .. frame.channels as usize {
+            buf.push(data_ptrs[c][q])
+        }
+    }
+}
+
+fn expand_packed_audio<T: Expandable>(frame: &ff::AVFrame, buf: &mut Vec<f32>){
+    let data_ptr: &[T] = unsafe {
+        std::slice::from_raw_parts(transmute(frame.extended_data.read()),
+                                   frame.nb_samples as usize
+                                   * frame.channels as usize)
+    };
+    for q in 0 .. (frame.nb_samples * frame.channels) as usize {
+        buf.push(data_ptr[q].expanded());
+    }
+}
+
+fn expand_planar_audio<T: Expandable>(frame: &ff::AVFrame, buf: &mut Vec<f32>){
+    assert!(frame.channels > 1);
+    let mut data_ptrs: Vec<&[T]> = Vec::with_capacity(frame.channels as usize);
+    for c in 0 .. frame.channels as usize {
+        data_ptrs.push(unsafe {
+            let raw_ptr = frame.extended_data.offset(c as isize).read();
+            std::slice::from_raw_parts(transmute(raw_ptr),
+                                       frame.nb_samples as usize)
+        });
+    }
+    for q in 0 .. frame.nb_samples as usize {
+        for c in 0 .. frame.channels as usize {
+            buf.push(data_ptrs[c][q].expanded())
+        }
+    }
+}
+
+// A primitive data type that is used to encode audio, and knows how to convert
+// into the standard floating point encoding.
+trait Expandable {
+    fn expanded(&self) -> f32;
+}
+
+impl Expandable for u8 {
+    fn expanded(&self) -> f32 {
+        (*self as f32 / 127.5) - 1.0
+    }
+}
+
+impl Expandable for i16 {
+    fn expanded(&self) -> f32 {
+        *self as f32 / i16::MAX as f32
+    }
+}
+
+impl Expandable for i32 {
+    fn expanded(&self) -> f32 {
+        *self as f32 / i32::MAX as f32
+    }
+}
+
+impl Expandable for i64 {
+    fn expanded(&self) -> f32 {
+        *self as f32 / i64::MAX as f32
+    }
+}
+
+impl Expandable for f64 {
+    // bit of a misnomer in this case...
+    fn expanded(&self) -> f32 {
+        *self as f32
+    }
+}
+
+/// Call once, at launch time, to do basic initialization of FFMPEG.
+pub fn init() {
+    // Allow ffmpeg to print massive quantities of debug information, but only
+    // if we're a debug build.
+    unsafe { ff::av_log_set_level(if cfg!(debug_assertions) { ff::AV_LOG_WARNING as libc::c_int } else { ff::AV_LOG_PANIC as libc::c_int }); }
 }

@@ -22,6 +22,7 @@ pub struct GenerationTracker {
 /// are guaranteed:
 /// - Our view into the world was coherent during the whole operation
 /// - The tracker is going to be bumped, later, and we can try again
+#[derive(PartialEq,Clone,Copy)]
 pub struct GenerationValue {
     n: usize,
 }
@@ -39,6 +40,20 @@ impl Display for GenerationValue {
 impl Debug for GenerationValue {
     fn fmt(&self, fmt: &mut Formatter<'_>) -> fmt::Result {
         Display::fmt(self, fmt)
+    }
+}
+
+impl GenerationValue {
+    /// Equivalent to assigning `NOT_GENERATED`; sets this generation number to
+    /// a value that no (touched) module will consider current.
+    pub fn destroy(&mut self) {
+        *self = NOT_GENERATED
+    }
+}
+
+impl Default for GenerationValue {
+    fn default() -> GenerationValue {
+        NOT_GENERATED
     }
 }
 
@@ -62,16 +77,15 @@ impl GenerationTracker {
     }
 }
 
-impl GenerationValue {
-    /// Equivalent to assigning `NOT_GENERATED`; sets this generation number to
-    /// a value that no (touched) module will consider current.
-    pub fn destroy(&mut self) {
-        *self = NOT_GENERATED
+impl Display for GenerationTracker {
+    fn fmt(&self, fmt: &mut Formatter<'_>) -> fmt::Result {
+        fmt.write_fmt(format_args!("{}", self.n.load(Ordering::Relaxed)))
     }
 }
 
-impl Default for GenerationValue {
-    fn default() -> GenerationValue {
-        NOT_GENERATED
+impl Debug for GenerationTracker {
+    fn fmt(&self, fmt: &mut Formatter<'_>) -> fmt::Result {
+        Display::fmt(self, fmt)
     }
 }
+

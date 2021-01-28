@@ -6,6 +6,7 @@ use std::{
     hash::{Hash, Hasher},
     ops::Deref,
     sync::{Arc, RwLock},
+    any::type_name,
 };
 
 /// A reference-counted (`Arc`) pointer to a lockable (`RwLock`) object.
@@ -29,11 +30,11 @@ impl<T: Debug> Debug for Reference<T> {
         match self.inner.try_read() {
             Ok(inner) => {
                 fmt.write_str("&<")?;
-                inner.fmt(fmt)?;
+                (*inner).fmt(fmt)?;
                 fmt.write_str(">")
             },
             Err(_) => {
-                fmt.write_str("&<locked>")
+                write!(fmt, "&<locked {} ref>", type_name::<T>())
             },
         }
     }

@@ -6,7 +6,7 @@ use crate::*;
 
 use std::{
     collections::VecDeque,
-    sync::{Arc, RwLock, Mutex, atomic::Ordering},
+    sync::{Arc, Mutex, atomic::Ordering},
     sync::mpsc::{Sender, Receiver, channel},
     time::Instant,
 };
@@ -17,6 +17,7 @@ use portaudio::{
     StreamCallbackResult,
 };
 use lazy_static::lazy_static;
+use anyhow::anyhow;
 
 /// The amount of data to try to keep in the audio queue. Totally arbitrary.
 const SAMPLES_AHEAD: usize = 50000;
@@ -71,12 +72,14 @@ impl Default for PlaybackStatus {
 }
 
 #[derive(Default)]
-pub struct InternalState {
+struct InternalState {
     /// The song that the user is *currently hearing*.
     active_song: Option<LogicalSongRef>,
     /// The song that the user *will* be hearing if *all buffers currently
     /// queued are played*.
     future_song: Option<LogicalSongRef>,
+    /// The FFMPEG input stream corresponding to `future_song`.
+    future_stream: Option<ffmpeg::AVFormat>,
     /// The playlist from which the *next* song will be drawn.
     future_playlist: Option<PlaylistRef>,
     /// The `GenerationValue` of `future_playlist` for which this shuffle is
@@ -90,8 +93,10 @@ pub struct InternalState {
 }
 
 lazy_static! {
-    static ref STATE: Arc<RwLock<InternalState>>
-        = Arc::new(RwLock::new(Default::default()));
+    // We can't have an `RwLock` here, because `RwLock` doesn't grant Sync (as
+    // multiple readers could read simultaneously) and `AVFormat` isn't Sync.
+    static ref STATE: Arc<Mutex<InternalState>>
+        = Arc::new(Mutex::new(Default::default()));
     // a bit silly to use an MPSC sender like this, but oh well
     static ref PLAYBACK_CONTROL_TX: Mutex<Option<Sender<PlaybackThreadMessage>>>
         = Mutex::new(None);
@@ -110,7 +115,7 @@ lazy_static! {
 /// Selects a different playlist to be active, without changing the active
 /// song.
 pub fn set_future_playlist(new_playlist: Option<PlaylistRef>) {
-    let mut me = STATE.write().unwrap();
+    let mut me = STATE.lock().unwrap();
     if me.future_playlist != new_playlist {
         me.future_playlist = new_playlist;
         me.shuffle_generation.destroy();
@@ -167,6 +172,8 @@ fn playback_callback(args: OutputCallbackArgs<f32>) -> StreamCallbackResult {
     else {
         time.buffer_dac
     };
+    let volume = prefs::get_volume() as f32 / 100.0;
+    let volume = volume * volume;
     let mut rem = buffer;
     let mut queue = FRAME_QUEUE.lock().unwrap();
     let current_audio_format = *CURRENT_AUDIO_FORMAT.lock().unwrap();
@@ -182,13 +189,13 @@ fn playback_callback(args: OutputCallbackArgs<f32>) -> StreamCallbackResult {
         let next_data = &next_el.data[next_el.consumed..];
         send_callback_report(now, SongPlaying { song_id: next_el.song_id, time: next_el.time + (next_el.consumed / channel_count as usize) as f64 / sample_rate});
         if next_data.len() > rem.len() {
-            rem.copy_from_slice(&next_data[..rem.len()]);
+            copy_with_volume(rem, &next_data[..rem.len()], volume);
             now += (rem.len() / channel_count as usize) as f64 / sample_rate;
             next_el.consumed += rem.len();
             rem = &mut [];
         }
         else {
-            (&mut rem[..next_data.len()]).copy_from_slice(next_data);
+            copy_with_volume(&mut rem[..next_data.len()], next_data, volume);
             now += (next_data.len() / channel_count as usize) as f64 / sample_rate;
             rem = &mut rem[next_data.len()..];
             queue.pop_front();
@@ -202,7 +209,7 @@ fn playback_callback(args: OutputCallbackArgs<f32>) -> StreamCallbackResult {
         None => {
             // No audio was left in the queue. We might have had a queue
             // underrun, or we might have reached the end of playback.
-            // We use `try_read()` instead of `read()` to lock the state
+            // We use `try_lock()` instead of `lock()` to lock the state
             // because we still hold the queue lock; since the playback thread
             // will acquire the queue lock while holding the state lock, if we
             // try to do the reverse we could end up with deadlock.
@@ -210,7 +217,7 @@ fn playback_callback(args: OutputCallbackArgs<f32>) -> StreamCallbackResult {
             // We'll play some extra silence, but that's okay.
             // TODO: "predicted playback status" is what matters here, not
             // the user-visible status
-            let status = STATE.try_read().map(|x| x.status)
+            let status = STATE.try_lock().map(|x| x.status)
                 .unwrap_or(PlaybackStatus::Playing);
             if status != PlaybackStatus::Playing  {
                 send_callback_report(now, PlaybackFinished);
@@ -231,73 +238,18 @@ fn playback_callback(args: OutputCallbackArgs<f32>) -> StreamCallbackResult {
     StreamCallbackResult::Continue
 }
 
-/// DELETE ME
-fn make_square_vec() -> Vec<f32> {
-    let mut ret = Vec::with_capacity(50000);
-    for i in (0..100).rev() {
-        for _ in 0..250 {
-            ret.push(0.1 * (i as f32 / 100.0));
-        }
-        for _ in 0..250 {
-            ret.push(-0.1 * (i as f32 / 100.0));
-        }
-    }
-    ret
-}
-
-/// Figures out what to play next (if relevant), reshuffles playlist (if
-/// relevant), and decodes as many `AudioFrame`s as necessary to make sure we
-/// have SAMPLES_AHEAD (times number of channels) samples queued.
-fn decode_some_frames(state: &Arc<RwLock<InternalState>>) {
-    // briefly hold the lock to figure out how many frames are queued up
-    let mut sample_count = FRAME_QUEUE.lock().unwrap().iter()
-        .fold(0, |total, el| total + (el.data.len() - el.consumed)
-              / (el.channel_count.max(1) as usize));
-    let square_vec = make_square_vec();
-    while sample_count < SAMPLES_AHEAD {
-        // We don't keep the queue locked during the inner loop, because we
-        // want to step on the audio callback as little as possible.
-        FRAME_QUEUE.lock().unwrap().push_back(AudioFrame {
-            song_id: SongID::from_db(1),
-            time: 0.0,
-            sample_rate: 44100.0,
-            channel_count: 1,
-            data: square_vec.clone(),
-            consumed: 0,
-        });
-        FRAME_QUEUE.lock().unwrap().push_back(AudioFrame {
-            song_id: SongID::from_db(2),
-            time: 10.0,
-            sample_rate: 48000.0,
-            channel_count: 1,
-            data: square_vec.clone(),
-            consumed: 0,
-        });
-        FRAME_QUEUE.lock().unwrap().push_back(AudioFrame {
-            song_id: SongID::from_db(3),
-            time: 100.0,
-            sample_rate: 44100.0,
-            channel_count: 2,
-            data: square_vec.clone(),
-            consumed: 0,
-        });
-        FRAME_QUEUE.lock().unwrap().push_back(AudioFrame {
-            song_id: SongID::from_db(4),
-            time: 1000.0,
-            sample_rate: 48000.0,
-            channel_count: 2,
-            data: square_vec.clone(),
-            consumed: 0,
-        });
-        sample_count += square_vec.len() * 3;
+fn copy_with_volume(dst: &mut[f32], src: &[f32], volume: f32) {
+    assert_eq!(dst.len(), src.len());
+    for n in 0 .. src.len() {
+        dst[n] = src[n] * volume;
     }
 }
 
-fn playback_thread(state: Arc<RwLock<InternalState>>,
+fn playback_thread(state: Arc<Mutex<InternalState>>,
                    playback_control_rx: Receiver<PlaybackThreadMessage> ) {
     let pa = PortAudio::new().expect("Could not initialize PortAudio");
     loop {
-        debug_assert_eq!(state.read().unwrap().status,
+        debug_assert_eq!(state.lock().unwrap().status,
                          PlaybackStatus::Stopped);
         // Not playing
         let requested_song = match playback_control_rx.recv() {
@@ -307,17 +259,18 @@ fn playback_thread(state: Arc<RwLock<InternalState>>,
             Ok(_) => continue, // still not playing!
         };
         {
-            let mut state = state.write().unwrap();
+            let mut state = state.lock().unwrap();
             state.status = PlaybackStatus::Playing;
-            state.active_song = requested_song;
+            state.future_song = requested_song;
+            state.future_stream = None;
         }
-        while state.read().unwrap().status != PlaybackStatus::Stopped {
+        while state.lock().unwrap().status != PlaybackStatus::Stopped {
             let (sample_rate, channel_count) = {
                 decode_some_frames(&state);
                 // double lock in the common case :(
                 match FRAME_QUEUE.lock().unwrap().get(0) {
                     None => {
-                        state.write().unwrap().status
+                        state.lock().unwrap().status
                             = PlaybackStatus::Stopped;
                         break;
                     },
@@ -357,9 +310,10 @@ fn playback_thread(state: Arc<RwLock<InternalState>>,
                         PlaybackThreadMessage::CallbackRan => (),
                         // TODO: pause, play
                         PlaybackThreadMessage::Command(Stop) => {
-                            let mut state = state.write().unwrap();
+                            let mut state = state.lock().unwrap();
                             state.status = PlaybackStatus::Stopped;
-                            state.active_song = None;
+                            state.future_song = None;
+                            state.future_stream = None;
                             let _ = stream.abort();
                             break 'alive_loop;
                         },
@@ -379,7 +333,7 @@ fn playback_thread(state: Arc<RwLock<InternalState>>,
                         let (_time, el) = report_queue.pop_front().unwrap();
                         match el {
                             SongPlaying { song_id, time: _songtime } => {
-                                let mut state = state.write().unwrap();
+                                let mut state = state.lock().unwrap();
                                 let change_song = match &state.active_song {
                                     &Some(ref x) => x.read().unwrap().get_id()
                                         != song_id,
@@ -395,7 +349,7 @@ fn playback_thread(state: Arc<RwLock<InternalState>>,
                             },
                             PlaybackFinished => {
                                 let _ = stream.abort();
-                                state.write().unwrap().status = PlaybackStatus::Stopped;
+                                state.lock().unwrap().status = PlaybackStatus::Stopped;
                                 break 'alive_loop;
                             },
                         }
@@ -407,3 +361,131 @@ fn playback_thread(state: Arc<RwLock<InternalState>>,
         }
     }
 }
+
+/// Wrapper that repeatedly calls `state.decode_some_frames()` until enough
+/// samples are queued.
+fn decode_some_frames(state: &Arc<Mutex<InternalState>>) {
+    // briefly hold the lock to figure out how many frames are queued up
+    let mut sample_count = FRAME_QUEUE.lock().unwrap().iter()
+        .fold(0, |total, el| total + (el.data.len() - el.consumed)
+              / (el.channel_count.max(1) as usize));
+    // (We don't keep the queue locked during the inner loop, because we
+    // want to hold up the audio callback as little as possible.)
+    while sample_count < SAMPLES_AHEAD {
+        // TODO: end of playback
+        let mut state = state.lock().unwrap();
+        sample_count += state.decode_some_frames(SAMPLES_AHEAD - sample_count);
+    }
+}
+
+impl InternalState {
+    /// Makes sure that the shuffled playlist is valid and up to date.
+    fn check_shuffle(&mut self) {
+        let playlist = self.future_playlist.as_ref().unwrap()
+            .maybe_refreshed();
+        if self.shuffle_generation != playlist.get_playlist_generation() {
+            self.shuffle_generation.destroy();
+            self.shuffled_playlist.clear();
+            self.shuffled_playlist.extend_from_slice(playlist.get_songs());
+            // TODO: actually shuffle (we can do it in place)
+            self.shuffle_generation = playlist.get_playlist_generation();
+        }
+   }
+    /// If there is no currently selected "future song", will try to select one
+    /// from the playlist.
+    fn check_future(&mut self) {
+        if self.future_song.is_some() { return }
+        self.future_song = self.shuffled_playlist.get(0).cloned()
+    }
+    /// If the "future stream" isn't open, tries to open it.
+    fn check_stream(&mut self) -> anyhow::Result<()> {
+        if self.future_stream.is_some() { return Ok(()) }
+        if let Some(future_song) = self.future_song.as_ref() {
+            self.future_stream = future_song.read().unwrap().open_stream();
+            if let Some(ref mut stream) = self.future_stream {
+                stream.find_stream_info()?;
+                // TODO: don't panic!
+                let best_stream = stream.find_best_stream()?;
+                eprintln!("best stream: {:?}", best_stream);
+                match best_stream {
+                    Some(x) => stream.open_stream(x)?,
+                    None => return Err(anyhow!("Is this not a music file?")),
+                }
+                Ok(())
+            }
+            else {
+                return Err(anyhow!("Unable to open stream"))
+            }
+        }
+        else {
+            return Err(anyhow!("No song?"))
+        }
+    }
+    /// Goes to the next song in the playlist, which might involve looping
+    /// and/or reshuffling the playlist.
+    fn next_song(&mut self) {
+        eprintln!("Next song...!");
+        let cur_index = match self.future_song.as_ref() {
+            Some(future_song) =>
+                self.shuffled_playlist.iter().position(|x| x == future_song),
+            None => None,
+        };
+        let next_index = match cur_index {
+            None => 0,
+            Some(x) if x == self.shuffled_playlist.len() - 1 => {
+                // TODO: reshuffle, loop flag
+                0
+            },
+            Some(x) => x + 1,
+        };
+        eprintln!("{:?}, {:?}", cur_index, next_index);
+        self.future_song = self.shuffled_playlist.get(next_index).cloned();
+        self.future_stream = None;
+    }
+    /// Figures out what to play next (if relevant), reshuffles playlist (if
+    /// relevant), and decodes a few `AudioFrames`. Will stop after the given
+    /// number of samples-per-channel have been decoded, or if the song
+    /// changes. Returns the number of samples decoded.
+    pub fn decode_some_frames(&mut self, sample_count: usize) -> usize {
+        if !self.future_playlist.is_none() {
+            self.check_shuffle();
+            self.check_future();
+        }
+        if !self.future_song.is_none() {
+            match self.check_stream() {
+                Ok(_) => (),
+                Err(x) => {
+                    eprintln!("Error while trying to open {:?}\n{:?}",
+                              self.future_song.as_ref().unwrap(), x);
+                    self.future_stream = None;
+                    self.next_song();
+                    return 0;
+                }
+            }
+        }
+        if !self.future_song.is_none() {
+            let song_id = self.future_song.as_ref().unwrap().read().unwrap().get_id();
+            if let Some(ref mut av) = self.future_stream {
+                let mut decoded_so_far = 0;
+                while decoded_so_far < sample_count {
+                     let more_left = av.decode_some(|time, sample_rate, channel_count, data| {
+                        assert!(data.len() > 0);
+                        assert!(channel_count > 0 && channel_count < 32);
+                        decoded_so_far += data.len() / channel_count as usize;
+                        FRAME_QUEUE.lock().unwrap().push_back(AudioFrame {
+                            song_id, consumed: 0,
+                            time, sample_rate, channel_count, data,
+                        });
+                    });
+                    if !more_left {
+                        self.next_song();
+                        break
+                    }
+                }
+                return decoded_so_far
+            }
+        }
+        return 0
+    }
+}
+
