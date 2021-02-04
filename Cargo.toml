@@ -3,6 +3,7 @@ name = "tsong"
 version = "0.1.0"
 authors = ["Solra Bizna <solra@bizna.name>"]
 edition = "2018"
+license = "MIT"
 
 [dependencies]
 gtk = {version = "0.9.0", features = ["v3_16"]}
