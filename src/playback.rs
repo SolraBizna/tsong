@@ -20,7 +20,7 @@ use lazy_static::lazy_static;
 use anyhow::anyhow;
 
 /// The amount of data to try to keep in the audio queue. Totally arbitrary.
-const SAMPLES_AHEAD: usize = 50000;
+const SAMPLES_AHEAD: usize = 100000;
 /// The number of buffers to keep around. (This applies to the audio API,
 /// unlike `SAMPLES_AHEAD`, which applies only to our own queue.)
 const DESIRED_LATENCY: f64 = 1.0;
@@ -38,7 +38,29 @@ struct AudioFrame {
 
 #[derive(Debug)]
 pub enum PlaybackCommand {
-    Play(Option<LogicalSongRef>), Pause, Stop
+    /// Start playing a song. If a song is provided, start at the beginning of
+    /// the target song. If not, if playback is currently paused, resume it. If
+    /// not, start playing the first song in the playlist.
+    ///
+    /// `Play(None)` = clicking on the Play control. `Play(some song)` =
+    /// double-clicking on a song in the playlist UI.
+    Play(Option<LogicalSongRef>),
+    /// Pause playback. A subsequent `Play(None)` will continue playback at the
+    /// last point in the song that the user heard.
+    Pause,
+    /// Stop playback. The current song is discarded, and a subsequent
+    /// `Play(None)` will start the playlist over.
+    Stop,
+    /// Go to the next song in the playlist. If the playlist is over, and
+    /// looping is not enabled, same as `Stop`. Otherwise, if playback is
+    /// currently not active, acts as if we paused at the beginning of the next
+    /// song.
+    Next,
+    /// Go to the previous song in the playlist. If we're at the beginning of
+    /// the playlist, or we're not near the beginning of a song, starts the
+    /// current song over. If playback is currently not active, acts as if we
+    /// paused at the beginning of whatever song gets picked.
+    Prev
 }
 use PlaybackCommand::*;
 
@@ -64,17 +86,32 @@ enum PlaybackThreadMessage {
 
 #[derive(Clone,Copy,Debug,PartialEq)]
 pub enum PlaybackStatus {
-    Playing, Paused, Stopped
+    /// A song is playing. The user is hearing audio.
+    Playing,
+    /// A song was playing, but has been paused. `Play(None)` at this point
+    /// will resume the selected song.
+    Paused,
+    /// No playback is happening and no song is selected.
+    Stopped,
 }
 
 impl Default for PlaybackStatus {
     fn default() -> PlaybackStatus { PlaybackStatus::Stopped }
 }
 
+impl PlaybackStatus {
+    /// True if playback is currently happening, false if it's paused or
+    /// stopped.
+    pub fn is_playing(&self) -> bool {
+        *self == PlaybackStatus::Playing
+    }
+}
+
 #[derive(Default)]
 struct InternalState {
-    /// The song that the user is *currently hearing*.
-    active_song: Option<LogicalSongRef>,
+    /// The song that the user is *currently hearing*, and the timestamp within
+    /// the song that (supposedly) is reaching their ears right now.
+    active_song: Option<(LogicalSongRef,f64)>,
     /// The song that the user *will* be hearing if *all buffers currently
     /// queued are played*.
     future_song: Option<LogicalSongRef>,
@@ -123,11 +160,23 @@ pub fn set_future_playlist(new_playlist: Option<PlaylistRef>) {
     }
 }
 
-/// Request that the given song start playing from the beginning. This will
-/// stop any playback currently in progress.
-pub fn start_playing_song(new_song: LogicalSongRef) {
-    send_playback_command(Stop);
-    send_playback_command(Play(Some(new_song)));
+/// Returns the current playback status.
+pub fn get_playback_status() -> PlaybackStatus {
+    STATE.lock().unwrap().status
+}
+
+/// Returns the song that is (or would be) being pumped into the user's ears
+/// at this exact moment, and the point that we are at in the song.
+pub fn get_active_song() -> Option<(LogicalSongRef,f64)> {
+    STATE.lock().unwrap().active_song.as_ref().cloned()
+}
+
+/// Returns the current playback status, and the active song. Only takes the
+/// lock once, so the values will be coherent with one another.
+pub fn get_status_and_active_song()
+-> (PlaybackStatus, Option<(LogicalSongRef,f64)>) {
+    let state = STATE.lock().unwrap();
+    (state.status, state.active_song.as_ref().cloned())
 }
 
 pub fn send_playback_command(wat: PlaybackCommand) {
@@ -249,22 +298,75 @@ fn playback_thread(state: Arc<Mutex<InternalState>>,
                    playback_control_rx: Receiver<PlaybackThreadMessage> ) {
     let pa = PortAudio::new().expect("Could not initialize PortAudio");
     loop {
-        debug_assert_eq!(state.lock().unwrap().status,
-                         PlaybackStatus::Stopped);
-        // Not playing
-        let requested_song = match playback_control_rx.recv() {
-            Err(_) => return, // bye bye...
-            Ok(PlaybackThreadMessage::Command(Play(song)))
-                => song,
-            Ok(_) => continue, // still not playing!
-        };
-        {
-            let mut state = state.lock().unwrap();
-            state.status = PlaybackStatus::Playing;
-            state.future_song = requested_song;
-            state.future_stream = None;
+        while state.lock().unwrap().status != PlaybackStatus::Playing {
+            match playback_control_rx.recv() {
+                Err(_) => return, // bye bye...
+                Ok(PlaybackThreadMessage::Command(cmd)) => {
+                    match cmd {
+                        Pause | Stop => (), // nothing to do
+                        Play(Some(song)) => {
+                            // Play the CHOSEN SONG.
+                            let mut state = state.lock().unwrap();
+                            state.status = PlaybackStatus::Playing;
+                            state.future_stream = None;
+                            state.future_song = Some(song.clone());
+                            state.active_song = Some((song, 0.0));
+                        },
+                        Play(None) => {
+                            // Play the CURRENT SONG, if there is one.
+                            // Otherwise, play the FIRST SONG.
+                            let mut state = state.lock().unwrap();
+                            if state.future_song.is_none() {
+                                state.next_song();
+                                state.active_song = state.future_song
+                                    .as_ref().map(|x| (x.clone(), 0.0));
+                            }
+                            state.status = match state.active_song {
+                                Some(_) => PlaybackStatus::Playing,
+                                None => PlaybackStatus::Stopped,
+                            };
+                        },
+                        Next => {
+                            // Queue the next song to be played, but don't
+                            // start playing it yet.
+                            let mut state = state.lock().unwrap();
+                            state.next_song();
+                            state.active_song = state.future_song
+                                .as_ref().map(|x| (x.clone(), 0.0));
+                            state.future_stream = None;
+                        },
+                        Prev => {
+                            // Queue the previous song to be played, but don't
+                            // start playing it yet.
+                            //
+                            // UNLESS...!
+                            let mut state = state.lock().unwrap();
+                            match state.active_song.as_mut() {
+                                Some((_,when)) if *when >= 5.0 => {
+                                    // Actually, start the current song over
+                                    // instead.
+                                    *when = 0.0;
+                                },
+                                _ => {
+                                    state.prev_song();
+                                    state.active_song = state.future_song
+                                        .as_ref().map(|x| (x.clone(), 0.0));
+                                },
+                            }
+                            state.future_stream = None;
+                        },
+                    }
+                },
+                Ok(_) => (), // still not playing!
+            }
         }
-        while state.lock().unwrap().status != PlaybackStatus::Stopped {
+        while state.lock().unwrap().status == PlaybackStatus::Playing {
+            // One of three things has happened:
+            // - We're starting playback from nothing. Make a new stream.
+            // - Sample rate changed during playback. Make a new stream.
+            // - User requested that a different song be played.
+            // - We hit the end of the playlist and looping isn't enabled.
+            //   Finish up. (This might be handled elsewhere?)
             let (sample_rate, channel_count) = {
                 decode_some_frames(&state);
                 // double lock in the common case :(
@@ -300,64 +402,137 @@ fn playback_thread(state: Arc<Mutex<InternalState>>,
             decode_some_frames(&state);
             stream.start()
                 .expect("Unable to start audio stream");
-            'alive_loop: loop {
+            'alive_loop: while state.lock().unwrap().status == PlaybackStatus::Playing {
                 let mut got_message = false;
+                // process at least one message. once at least one message has
+                // received, process any that are *still waiting*, then go do
+                // periodic tasks.
                 while let Some(message) =
                         if got_message { playback_control_rx.try_recv().ok() }
                         else { playback_control_rx.recv().ok() } {
                     got_message = true;
                     match message {
                         PlaybackThreadMessage::CallbackRan => (),
-                        // TODO: pause, play
-                        PlaybackThreadMessage::Command(Stop) => {
-                            let mut state = state.lock().unwrap();
-                            state.status = PlaybackStatus::Stopped;
-                            state.future_song = None;
-                            state.future_stream = None;
-                            let _ = stream.abort();
-                            break 'alive_loop;
+                        PlaybackThreadMessage::Command(cmd) => {
+                            match cmd {
+                                Stop => {
+                                    let mut state = state.lock().unwrap();
+                                    state.status = PlaybackStatus::Stopped;
+                                    state.future_song = None;
+                                    state.future_stream = None;
+                                    break 'alive_loop;
+                                },
+                                Pause => {
+                                    let mut state = state.lock().unwrap();
+                                    state.status = PlaybackStatus::Paused;
+                                    break 'alive_loop;
+                                },
+                                Play(Some(song)) => {
+                                    let mut state = state.lock().unwrap();
+                                    state.future_song = Some(song);
+                                    break 'alive_loop;
+                                },
+                                Play(None) => (), // nothing to do
+                                Next => {
+                                    let mut state = state.lock().unwrap();
+                                    // play the next song, AS THE USER HEARS
+                                    state.future_stream = None;
+                                    state.future_song = state.active_song.as_mut().map(|(x,_)| x.clone());
+                                    state.next_song();
+                                    break 'alive_loop;
+                                },
+                                Prev => {
+                                    let mut state = state.lock().unwrap();
+                                    state.future_stream = None;
+                                    match state.active_song.as_mut() {
+                                        Some((song,when)) if *when >= 5.0 => {
+                                            // Actually, start the current song
+                                            // over instead.
+                                            *when = 0.0;
+                                            state.future_song = Some(song.clone());
+                                        },
+                                        _ => {
+                                            state.prev_song();
+                                        },
+                                    }
+                                    break 'alive_loop;
+                                },
+                            }
                         },
-                        _ => continue,
                     }
                 }
-                // Now run any necessary periodic tasks.
+                // Now run any necessary periodic tasks, such as updating the
+                // current time and song that we report.
                 let now = if BROKEN_STREAM_TIME.load(Ordering::Acquire) {
                     BROKEN_EPOCH.elapsed().as_secs_f64()
                 } else { stream.time() };
-                //eprintln!("Now: {}", now);
-                { 
-                    let mut report_queue = REPORT_QUEUE.lock().unwrap();
-                    while report_queue.get(0).map(|x| x.0 <= now)
-                            .unwrap_or(false) {
-                        //eprintln!("Report: {:?}", report_queue.get(0));
-                        let (_time, el) = report_queue.pop_front().unwrap();
-                        match el {
-                            SongPlaying { song_id, time: _songtime } => {
-                                let mut state = state.lock().unwrap();
-                                let change_song = match &state.active_song {
-                                    &Some(ref x) => x.read().unwrap().get_id()
-                                        != song_id,
-                                    &None => true
-                                };
-                                if change_song {
-                                    state.active_song = Some(logical::get_song_by_song_id(song_id).expect("Playback changed to a song not in the database!"));
-                                }
-                            },
-                            SampleFormatChanged => {
-                                let _ = stream.abort();
-                                break 'alive_loop;
-                            },
-                            PlaybackFinished => {
-                                let _ = stream.abort();
-                                state.lock().unwrap().status = PlaybackStatus::Stopped;
-                                break 'alive_loop;
-                            },
-                        }
+                // temporarily take the report queue lock and...
+                let mut report_queue = REPORT_QUEUE.lock().unwrap();
+                while report_queue.get(0).map(|x| x.0 <= now).unwrap_or(false){
+                    let (report_time, el) = report_queue.pop_front().unwrap();
+                    match el {
+                        SongPlaying { song_id, time: songtime } => {
+                            let mut state = state.lock().unwrap();
+                            let change_song = match &state.active_song {
+                                &Some(ref x) => x.0.read().unwrap()
+                                    .get_id() != song_id,
+                                &None => true
+                            };
+                            let songtime = songtime + (now - report_time);
+                            if change_song {
+                                state.active_song = Some((logical::get_song_by_song_id(song_id).expect("Playback changed to a song not in the database!"), songtime));
+                            }
+                            else {
+                                state.active_song.as_mut().unwrap().1 = songtime;
+                            }
+                        },
+                        SampleFormatChanged => {
+                            break 'alive_loop;
+                        },
+                        PlaybackFinished => {
+                            state.lock().unwrap().status = PlaybackStatus::Stopped;
+                            break 'alive_loop;
+                        },
                     }
                 }
+                // release the lock...
+                drop(report_queue);
+                // ...so that we're not holding it during the (expensive)
+                // decoding step
                 decode_some_frames(&state);
             }
+            // Clean up!
+            let _ = stream.abort();
+            // Any reports after we decided to kill the stream are of no
+            // consequence.
             REPORT_QUEUE.lock().unwrap().clear();
+            // Any frames that the user was *going* to hear after they hit the
+            // end of playback are of no consequence.
+            FRAME_QUEUE.lock().unwrap().clear();
+            let mut state = state.lock().unwrap();
+            match state.status {
+                PlaybackStatus::Playing => (),
+                PlaybackStatus::Paused => {
+                    // Whatever song the user was hearing when they hit pause,
+                    // that's where we paused.
+                    let (cur_song, timestamp) = state.active_song.as_ref().map(|(x,y)| (x.clone(), *y)).expect("Paused, but there is no current song?");
+                    if Some(&cur_song) != state.future_song.as_ref() {
+                        state.future_song = Some(cur_song);
+                        state.future_stream = None;
+                    }
+                    if state.future_song.is_some() {
+                        state.check_future();
+                    }
+                    if let Some(stream) = state.future_stream.as_mut() {
+                        stream.seek_to_time(timestamp);
+                    }
+                },
+                PlaybackStatus::Stopped => {
+                    // There is no longer an active song.
+                    state.future_song = None;
+                    state.active_song = None;
+                },
+            }
         }
     }
 }
@@ -381,7 +556,8 @@ fn decode_some_frames(state: &Arc<Mutex<InternalState>>) {
 impl InternalState {
     /// Makes sure that the shuffled playlist is valid and up to date.
     fn check_shuffle(&mut self) {
-        let playlist = self.future_playlist.as_ref().unwrap()
+        let playlist = self.future_playlist.as_ref()
+            .expect("There should always be at least an \"All Songs\" playlist!")
             .maybe_refreshed();
         if self.shuffle_generation != playlist.get_playlist_generation() {
             self.shuffle_generation.destroy();
@@ -406,11 +582,11 @@ impl InternalState {
                 stream.find_stream_info()?;
                 // TODO: don't panic!
                 let best_stream = stream.find_best_stream()?;
-                eprintln!("best stream: {:?}", best_stream);
-                match best_stream {
+                let durr = match best_stream {
                     Some(x) => stream.open_stream(x)?,
                     None => return Err(anyhow!("Is this not a music file?")),
-                }
+                };
+                future_song.set_duration(durr);
                 Ok(())
             }
             else {
@@ -424,6 +600,7 @@ impl InternalState {
     /// Goes to the next song in the playlist, which might involve looping
     /// and/or reshuffling the playlist.
     fn next_song(&mut self) {
+        self.check_shuffle();
         eprintln!("Next song...!");
         let cur_index = match self.future_song.as_ref() {
             Some(future_song) =>
@@ -438,8 +615,34 @@ impl InternalState {
             },
             Some(x) => x + 1,
         };
-        eprintln!("{:?}, {:?}", cur_index, next_index);
         self.future_song = self.shuffled_playlist.get(next_index).cloned();
+        self.future_stream = None;
+    }
+    /// Goes to the previous song in the playlist, or start the current one
+    /// over if we're at the beginning of the shuffle *or* if this song is not
+    /// in the active playlist.
+    ///
+    /// THIS IS NOT THE SAME BEHAVIOR AS THE `Prev` COMMAND!
+    fn prev_song(&mut self) {
+        self.check_shuffle();
+        eprintln!("Previous song...!");
+        let cur_index = match self.future_song.as_ref() {
+            Some(future_song) =>
+                self.shuffled_playlist.iter().position(|x| x == future_song),
+            None => None,
+        };
+        let next_index = match cur_index {
+            None => None,
+            Some(x) if x == 0 => None,
+            Some(x) => Some(x - 1),
+        };
+        match next_index {
+            None => (), // don't change future_song, just start stream over
+            Some(x) => {
+                self.future_song
+                    = self.shuffled_playlist.get(x).cloned();
+            }
+        };
         self.future_stream = None;
     }
     /// Figures out what to play next (if relevant), reshuffles playlist (if

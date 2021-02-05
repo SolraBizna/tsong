@@ -66,6 +66,23 @@ fn transcribe_dict(out: &mut BTreeMap<String, String>,
     }
 }
 
+/// Converts an input timestamp in seconds-from-beginning to an output
+/// timestamp in stream-specific units.
+fn float_time_to_fftime(ftime: f64, inner: &ff::AVFormatContext,
+                               stream: &ff::AVStream) -> i64 {
+    let timebase = &stream.time_base;
+    let start_pts = match stream.start_time {
+        x if x == unsafe { ffdefs::av_nopts_value() } => match inner.start_time {
+            x if x == unsafe { ffdefs::av_nopts_value() } => 0,
+            x => x,
+        },
+        x => x,
+    };
+    ((ftime * timebase.den as f64) / (timebase.num as f64)).floor() as i64
+        + start_pts
+}
+// TODO: fftime_to_float_time
+
 /// Wraps an (input!) `AVFormatContext`
 pub struct AVFormat {
     /// A pointer to the `AVFormatContext` that we're managing, or null if
@@ -81,6 +98,10 @@ pub struct AVFormat {
     /// A single frame—or several frames, for PCM/etc—of decoded data from the
     /// codec.
     frame: *mut ff::AVFrame,
+    /// Some half-consumed data that we decoded after a seek. We consume some
+    /// frames, and then possibly part of a frame, which means there may be
+    /// a partial frame and then some complete frames left over.
+    leftovers: Vec<(f64, f64, i32, Vec<f32>)>,
 }
 
 /// This can be sent, as long as it's `Sync`ed...
@@ -126,7 +147,8 @@ impl AVFormat {
         assert!(!inner.is_null());
         Ok(AVFormat { inner, codec_ctx: null_mut(), stream: -1,
                       frame: null_mut(),
-                      packet: unsafe { std::mem::zeroed() } })
+                      packet: unsafe { std::mem::zeroed() },
+                      leftovers: Vec::new() })
     }
     /// Calls `avformat_find_stream_info`.
     pub fn find_stream_info(&mut self) -> anyhow::Result<()> {
@@ -194,9 +216,11 @@ impl AVFormat {
             self.inner = null_mut();
         }
     }
-    /// Opens the given audio stream for playback.
-    pub fn open_stream(&mut self, stream: libc::c_int) -> anyhow::Result<()> {
+    /// Opens the given audio stream for playback. Returns the estimated
+    /// duration of the opened stream.
+    pub fn open_stream(&mut self, stream: libc::c_int) -> anyhow::Result<u32> {
         self.maybe_close_codec();
+        let durr = self.estimate_duration(stream);
         let stream_ref = self.get_stream_ref(stream);
         let codecpar = unsafe { stream_ref.codecpar.as_ref().unwrap() };
         let decoder = unsafe {
@@ -206,7 +230,7 @@ impl AVFormat {
         unsafe {
             /* Somebody told me you couldn't reuse the codec context in the
              * stream struct. It looks like they were wrong, but here we are.
-             * */
+             * Being in a cargo cult feels weird. */
             let mut nu_ctx = ff::avcodec_alloc_context3(decoder);
             match ff::avcodec_parameters_to_context(nu_ctx, codecpar) {
                 0 => (),
@@ -228,7 +252,7 @@ impl AVFormat {
                 },
             }
         }
-        Ok(())
+        Ok(durr)
     }
     fn decode_from_packet<H>(&mut self, packet: &ff::AVPacket, handler: &mut H)
     -> anyhow::Result<i32>
@@ -310,6 +334,11 @@ impl AVFormat {
     {
         assert!(!self.inner.is_null());
         assert!(!self.codec_ctx.is_null());
+        let mut leftovers = Vec::new();
+        std::mem::swap(&mut leftovers, &mut self.leftovers);
+        for p in leftovers.into_iter() {
+            handler(p.0, p.1, p.2, p.3);
+        }
         self.packet.data = null_mut();
         self.packet.size = 0;
         loop {
@@ -360,6 +389,62 @@ impl AVFormat {
         }
         unsafe { ff::av_free_packet(&mut self.packet) }
         true
+    }
+    /// Seek to the given time in the open stream. This may entail some
+    /// decoding. Tries to be as exact as possible.
+    ///
+    /// If there are errors, they'll go into a log somewhere...
+    pub fn seek_to_time(&mut self, target: f64) {
+        let inner = unsafe { self.inner.as_ref() }.unwrap();
+        assert!(!self.codec_ctx.is_null());
+        let stream_ref = self.get_stream_ref(self.stream);
+        let target_timestamp
+            = float_time_to_fftime(target, inner, stream_ref);
+        match unsafe { ff::av_seek_frame(self.inner, self.stream,
+                                         target_timestamp,
+                                         ff::AVSEEK_FLAG_BACKWARD as i32)} {
+            0 => (),
+            x => {
+                eprintln!("av_seek_frame returned {}", x);
+                return; // well, we tried
+            },
+        }
+        unsafe { ff::avcodec_flush_buffers(self.codec_ctx) };
+        eprintln!("Seeking to {} = {}!", target, target_timestamp);
+        let mut leftovers = Vec::new();
+        self.decode_some(|start_time, sample_rate, channel_count, mut buf| {
+            let end_time = start_time + (buf.len() / channel_count as usize)
+                as f64 / sample_rate;
+            if end_time < target {
+                // do nothing
+            }
+            else if start_time >= target {
+                // pure leftover!
+                leftovers.push((start_time, sample_rate,
+                                channel_count, buf));
+            }
+            else {
+                let cutoff_index = ((target - start_time) * sample_rate)
+                    .floor() as usize * channel_count as usize;
+                buf.drain(..cutoff_index);
+                leftovers.push((target, sample_rate, channel_count, buf));
+            }
+        });
+        // Do a very fast fade-in over the first leftover frame (if any)
+        if let Some((_, _, channel_count, buf))
+        = leftovers.get_mut(0) {
+            let mut i = 0;
+            let fade_len = (buf.len() / *channel_count as usize).min(1000);
+            let fade_mult = 1.0 / (fade_len as f32);
+            for n in 1..fade_len-1 {
+                let volume = (n as f32) * fade_mult;
+                for _ in 0..*channel_count as usize {
+                    buf[i] *= volume;
+                    i += 1;
+                }
+            }
+        }
+        self.leftovers = leftovers;
     }
 }
 

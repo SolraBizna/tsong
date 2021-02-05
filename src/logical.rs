@@ -98,6 +98,7 @@ pub struct LogicalSong {
     id: SongID,
     user_metadata: BTreeMap<String, String>,
     physical_files: Vec<FileID>,
+    duration: u32, // (duration of last played back version)
     // Not stored in database; populated as the database is loaded
     similarity_recs: Vec<SimilarityRec>,
 }
@@ -143,7 +144,8 @@ fn is_safe_raw_meta(k: &str) -> bool {
 
 /// Takes some raw, FFMPEG metadata, and returns the Tsong metadata we want to
 /// create from it.
-fn munch_ffmpeg_metadata(in_meta: &BTreeMap<String, String>)
+fn munch_ffmpeg_metadata(in_meta: &BTreeMap<String, String>,
+                         duration: u32)
 -> BTreeMap<String, String> {
     let mut ret = BTreeMap::new();
     ret.insert("unchecked".to_owned(), "true".to_owned());
@@ -151,6 +153,7 @@ fn munch_ffmpeg_metadata(in_meta: &BTreeMap<String, String>)
         if is_safe_raw_meta(k) { ret.insert(k.to_owned(), v.to_owned()); }
         else { ret.insert("raw_".to_owned() + k, v.to_owned()); }
     }
+    ret.insert("duration".to_owned(), format!("{}", duration));
     ret
 }
 
@@ -212,7 +215,9 @@ pub fn incorporate_physical(file_id: &FileID,
         // match!
         let possibility = &possibilities[0];
         eprintln!("Existing song! score = {}, title = {:?}", possibility.1, possibility.0.read().unwrap().user_metadata.get("title"));
-        todo!();
+        let mut logical_song = possibility.0.write().unwrap();
+        logical_song.physical_files.push(*file_id);
+        logical_song.similarity_recs.push(similarity_rec);
     }
     // TODO: soft match
     else {
@@ -220,8 +225,10 @@ pub fn incorporate_physical(file_id: &FileID,
         let song_id = SongID::new();
         let new_song = LogicalSongRef::new(LogicalSong {
             id: song_id,
-            user_metadata: munch_ffmpeg_metadata(&metadata),
+            user_metadata: munch_ffmpeg_metadata(&metadata,
+                                                 similarity_rec.duration),
             physical_files: vec![*file_id],
+            duration: similarity_rec.duration,
             similarity_recs: vec![similarity_rec.clone()],
         });
         eprintln!("New song! {:?}", new_song.read().unwrap().user_metadata.get("title"));
@@ -278,6 +285,17 @@ impl LogicalSong {
         }
         None
     }
+    /// Returns the (estimated) duration of the song, in seconds.
+    pub fn get_duration(&self) -> u32 { self.duration }
+    /// Updates the duration of the song. This can happen if different physical
+    /// files of the song have different estimated durations because of codec
+    /// differences, and a different one is chosen to be played...
+    pub fn set_duration(&mut self, nu: u32) {
+        if self.duration != nu {
+            // TODO: database update
+            self.duration = nu;
+        }
+    }
 }
 
 impl Debug for LogicalSong {
@@ -314,3 +332,10 @@ impl Debug for LogicalSong {
     }
 }
 
+impl LogicalSongRef {
+    pub fn set_duration(&self, durr: u32) {
+        if self.read().unwrap().get_duration() != durr {
+            self.write().unwrap().set_duration(durr)
+        }
+    }
+}

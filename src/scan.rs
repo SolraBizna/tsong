@@ -7,14 +7,15 @@ use std::{
     fs,
     path::{Path, PathBuf},
     rc::Rc,
-    sync::{atomic::{AtomicU32, Ordering}, Arc, mpsc},
+    sync::{atomic::{AtomicU32, Ordering}, Arc, Mutex, mpsc},
     thread,
 };
+use lazy_static::lazy_static;
 
 use crate::*;
 
 /// Encapsulates the communication channels to and from the search thread.
-pub struct ScanThread {
+struct ScanThread {
     rescan_request_tx: mpsc::Sender<Vec<String>>,
     scan_result_rx: mpsc::Receiver<anyhow::Result<()>>,
     // Incremented by `rescan`. Decremented by the scan thread.
@@ -185,4 +186,24 @@ fn search_thread_body(rescan_request_rx: mpsc::Receiver<Vec<String>>,
             Err(_) => return, // we got dropped, oh well
         }
     }
+}
+
+lazy_static! {
+    static ref SCAN_THREAD: Mutex<ScanThread> = Mutex::new(ScanThread::new());
+}
+
+/// Starts scanning the music paths chosen in preferences.
+pub fn rescan() {
+    SCAN_THREAD.lock().unwrap().rescan(prefs::get_music_paths()).unwrap();
+}
+
+/// Returns a scan result, blocking if necessary. Returns:
+/// - `Err(...)` → The scanning thread crashed
+/// - `Ok(None)` → Scanning is complete
+/// - `Ok(Some(Ok(...)))` → A scan finished (but scanning is not
+///   necessarily complete)
+/// - `Ok(Some(Err(...)))` → An error was encountered scanning a particular
+///   file, but the scan is continuing
+pub fn get_result_blocking() -> anyhow::Result<Option<anyhow::Result<()>>> {
+    SCAN_THREAD.lock().unwrap().get_result_blocking()
 }
