@@ -233,6 +233,8 @@ dependencies = [
 [[package]]
 name = "ffmpeg-dev"
 version = "0.3.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4cab3aaa1dee258d1055790beb2af6b853d80f2e6ffc222f04dc4f1369b7b8d"
 dependencies = [
  "bindgen",
  "cc",
