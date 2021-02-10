@@ -1,0 +1,44 @@
+#osd {
+    background-color: #132;
+    color: #3f7;
+    border-top: 1px solid #222222;
+    border-right: 1px solid #252525;
+    border-bottom: 1px solid #292929;
+    margin-top: 2px;
+    margin-bottom: 2px;
+}
+#controls #playpause label {
+    font-size: 200%;
+    margin-top: -6px;
+    margin-bottom: -10px;
+}
+#controls #prev label, #controls #next label {
+    margin-top: 2px;
+}
+#controls {
+    min-height: 54px;
+    margin-left: 6px;
+    margin-right: 6px;
+}
+#controls button, #playlist #meta button {
+    min-width: 48px;
+    min-height: 32px;
+    padding: 0 0 0 0;
+}
+#controls #prev, #controls #next {
+    min-width: 40px;
+    min-height: 40px;
+}
+#controls #playpause {
+    min-width: 46px;
+    min-height: 46px;
+}
+#playlist_stats {
+    opacity: 0.5;
+}
+#playlists {
+    min-width: 150px;
+}
+#scan_spinner {
+    margin-right: 1em;
+}

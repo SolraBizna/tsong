@@ -119,11 +119,6 @@ struct InternalState {
     future_stream: Option<ffmpeg::AVFormat>,
     /// The playlist from which the *next* song will be drawn.
     future_playlist: Option<PlaylistRef>,
-    /// The `GenerationValue` of `future_playlist` for which this shuffle is
-    /// up to date.
-    shuffle_generation: GenerationValue,
-    /// The shuffled song list.
-    shuffled_playlist: Vec<LogicalSongRef>,
     /// The playback thread will update this to reflect the current playback
     /// state, as it changes in response to commands.
     status: PlaybackStatus,
@@ -155,8 +150,6 @@ pub fn set_future_playlist(new_playlist: Option<PlaylistRef>) {
     let mut me = STATE.lock().unwrap();
     if me.future_playlist != new_playlist {
         me.future_playlist = new_playlist;
-        me.shuffle_generation.destroy();
-        me.shuffled_playlist.clear();
     }
 }
 
@@ -179,7 +172,7 @@ pub fn get_status_and_active_song()
     (state.status, state.active_song.as_ref().cloned())
 }
 
-pub fn send_playback_command(wat: PlaybackCommand) {
+pub fn send_command(wat: PlaybackCommand) {
     let mut playback_control_tx = PLAYBACK_CONTROL_TX.lock().unwrap();
     if playback_control_tx.is_none() {
         let (tx, rx) = channel();
@@ -430,6 +423,7 @@ fn playback_thread(state: Arc<Mutex<InternalState>>,
                                 Play(Some(song)) => {
                                     let mut state = state.lock().unwrap();
                                     state.future_song = Some(song);
+                                    state.future_stream = None;
                                     break 'alive_loop;
                                 },
                                 Play(None) => (), // nothing to do
@@ -520,11 +514,10 @@ fn playback_thread(state: Arc<Mutex<InternalState>>,
                         state.future_song = Some(cur_song);
                         state.future_stream = None;
                     }
-                    if state.future_song.is_some() {
-                        state.check_future();
-                    }
-                    if let Some(stream) = state.future_stream.as_mut() {
-                        stream.seek_to_time(timestamp);
+                    if state.check_stream().is_ok() {
+                        if let Some(stream) = state.future_stream.as_mut() {
+                            stream.seek_to_time(timestamp);
+                        }
                     }
                 },
                 PlaybackStatus::Stopped => {
@@ -554,25 +547,6 @@ fn decode_some_frames(state: &Arc<Mutex<InternalState>>) {
 }
 
 impl InternalState {
-    /// Makes sure that the shuffled playlist is valid and up to date.
-    fn check_shuffle(&mut self) {
-        let playlist = self.future_playlist.as_ref()
-            .expect("There should always be at least an \"All Songs\" playlist!")
-            .maybe_refreshed();
-        if self.shuffle_generation != playlist.get_playlist_generation() {
-            self.shuffle_generation.destroy();
-            self.shuffled_playlist.clear();
-            self.shuffled_playlist.extend_from_slice(playlist.get_songs());
-            // TODO: actually shuffle (we can do it in place)
-            self.shuffle_generation = playlist.get_playlist_generation();
-        }
-   }
-    /// If there is no currently selected "future song", will try to select one
-    /// from the playlist.
-    fn check_future(&mut self) {
-        if self.future_song.is_some() { return }
-        self.future_song = self.shuffled_playlist.get(0).cloned()
-    }
     /// If the "future stream" isn't open, tries to open it.
     fn check_stream(&mut self) -> anyhow::Result<()> {
         if self.future_stream.is_some() { return Ok(()) }
@@ -600,22 +574,23 @@ impl InternalState {
     /// Goes to the next song in the playlist, which might involve looping
     /// and/or reshuffling the playlist.
     fn next_song(&mut self) {
-        self.check_shuffle();
-        eprintln!("Next song...!");
+        let playlist = self.future_playlist.as_ref().unwrap()
+            .maybe_refreshed();
+        let songs = playlist.get_songs();
         let cur_index = match self.future_song.as_ref() {
             Some(future_song) =>
-                self.shuffled_playlist.iter().position(|x| x == future_song),
+                songs.iter().position(|x| x == future_song),
             None => None,
         };
         let next_index = match cur_index {
             None => 0,
-            Some(x) if x == self.shuffled_playlist.len() - 1 => {
+            Some(x) if x == songs.len() - 1 => {
                 // TODO: reshuffle, loop flag
                 0
             },
             Some(x) => x + 1,
         };
-        self.future_song = self.shuffled_playlist.get(next_index).cloned();
+        self.future_song = songs.get(next_index).cloned();
         self.future_stream = None;
     }
     /// Goes to the previous song in the playlist, or start the current one
@@ -624,11 +599,11 @@ impl InternalState {
     ///
     /// THIS IS NOT THE SAME BEHAVIOR AS THE `Prev` COMMAND!
     fn prev_song(&mut self) {
-        self.check_shuffle();
-        eprintln!("Previous song...!");
+        let playlist = self.future_playlist.as_ref().unwrap()
+            .maybe_refreshed();
+        let songs = playlist.get_songs();
         let cur_index = match self.future_song.as_ref() {
-            Some(future_song) =>
-                self.shuffled_playlist.iter().position(|x| x == future_song),
+            Some(future_song) => songs.iter().position(|x| x == future_song),
             None => None,
         };
         let next_index = match cur_index {
@@ -639,8 +614,7 @@ impl InternalState {
         match next_index {
             None => (), // don't change future_song, just start stream over
             Some(x) => {
-                self.future_song
-                    = self.shuffled_playlist.get(x).cloned();
+                self.future_song = songs.get(x).cloned();
             }
         };
         self.future_stream = None;
@@ -650,10 +624,6 @@ impl InternalState {
     /// number of samples-per-channel have been decoded, or if the song
     /// changes. Returns the number of samples decoded.
     pub fn decode_some_frames(&mut self, sample_count: usize) -> usize {
-        if !self.future_playlist.is_none() {
-            self.check_shuffle();
-            self.check_future();
-        }
         if !self.future_song.is_none() {
             match self.check_stream() {
                 Ok(_) => (),

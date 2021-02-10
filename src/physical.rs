@@ -215,7 +215,7 @@ pub fn open_stream(id: &FileID) -> Option<ffmpeg::AVFormat> {
     let files = PHYSICAL_FILES.read().unwrap();
     let file = files.get(id)?.read().unwrap();
     for path in file.absolute_paths.iter() {
-        eprintln!("{:?}?", path);
+        // eprintln!("{:?}?", path);
         match ffmpeg::AVFormat::open_input(&path) {
             Ok(x) => return Some(x),
             Err(x) => {
@@ -224,6 +224,6 @@ pub fn open_stream(id: &FileID) -> Option<ffmpeg::AVFormat> {
             }
         }
     }
-    eprintln!("no...");
+    // eprintln!("no...");
     None
 }

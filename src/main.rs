@@ -15,13 +15,13 @@ pub use reference::Reference;
 pub use generation::{GenerationTracker, GenerationValue, NOT_GENERATED};
 pub use physical::{PhysicalFile, PhysicalFileRef, FileID};
 pub use logical::{LogicalSong, LogicalSongRef, SongID};
-pub use playlist::{Playlist, PlaylistRef};
-pub use playback::{PlaybackCommand};
+pub use playlist::{Playlist, PlaylistRef, PlaylistID};
+pub use playback::{PlaybackCommand, PlaybackStatus};
+pub use scan::ScanThread;
 
 fn main() {
     prefs::read().unwrap();
     db::load_database().unwrap();
     ffmpeg::init();
-    scan::rescan();
     ui::go();
 }

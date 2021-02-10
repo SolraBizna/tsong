@@ -7,15 +7,14 @@ use std::{
     fs,
     path::{Path, PathBuf},
     rc::Rc,
-    sync::{atomic::{AtomicU32, Ordering}, Arc, Mutex, mpsc},
+    sync::{atomic::{AtomicU32, Ordering}, Arc, mpsc},
     thread,
 };
-use lazy_static::lazy_static;
 
 use crate::*;
 
 /// Encapsulates the communication channels to and from the search thread.
-struct ScanThread {
+pub struct ScanThread {
     rescan_request_tx: mpsc::Sender<Vec<String>>,
     scan_result_rx: mpsc::Receiver<anyhow::Result<()>>,
     // Incremented by `rescan`. Decremented by the scan thread.
@@ -60,6 +59,28 @@ impl ScanThread {
             // one Ok(()) before scans_left becomes zero.
             match self.scan_result_rx.recv() {
                 Ok(x) => Ok(Some(x)),
+                Err(_) => Err(anyhow!("Scan thread crashed")),
+            }
+        }
+    }
+    /// Returns a scan result, without blocking. Returns:
+    /// - `Err(...)` → The scanning thread crashed
+    /// - `Ok((true, None))` → Scanning is complete
+    /// - `Ok((false, None))` → Nothing to report right now
+    /// - `Ok((false, Some(Ok(...))))` → A scan finished (but scanning is not
+    ///   necessarily complete)
+    /// - `Ok((false, Some(Err(...))))` → An error was encountered scanning a
+    ///   particular file, but the scan is continuing onward.
+    pub fn get_result_nonblocking(&mut self)
+    -> anyhow::Result<(bool, Option<anyhow::Result<()>>)> {
+        if self.scans_left.load(Ordering::SeqCst) == 0 { Ok((true, None)) }
+        else {
+            // if we fetched it and it wasn't zero, then—since we are the
+            // sole consumer of this queue—we will DEFINITELY get at least
+            // one Ok(()) before scans_left becomes zero.
+            match self.scan_result_rx.try_recv() {
+                Ok(x) => Ok((false, Some(x))),
+                Err(mpsc::TryRecvError::Empty) => Ok((false, None)),
                 Err(_) => Err(anyhow!("Scan thread crashed")),
             }
         }
@@ -186,24 +207,4 @@ fn search_thread_body(rescan_request_rx: mpsc::Receiver<Vec<String>>,
             Err(_) => return, // we got dropped, oh well
         }
     }
-}
-
-lazy_static! {
-    static ref SCAN_THREAD: Mutex<ScanThread> = Mutex::new(ScanThread::new());
-}
-
-/// Starts scanning the music paths chosen in preferences.
-pub fn rescan() {
-    SCAN_THREAD.lock().unwrap().rescan(prefs::get_music_paths()).unwrap();
-}
-
-/// Returns a scan result, blocking if necessary. Returns:
-/// - `Err(...)` → The scanning thread crashed
-/// - `Ok(None)` → Scanning is complete
-/// - `Ok(Some(Ok(...)))` → A scan finished (but scanning is not
-///   necessarily complete)
-/// - `Ok(Some(Err(...)))` → An error was encountered scanning a particular
-///   file, but the scan is continuing
-pub fn get_result_blocking() -> anyhow::Result<Option<anyhow::Result<()>>> {
-    SCAN_THREAD.lock().unwrap().get_result_blocking()
 }

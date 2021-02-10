@@ -39,11 +39,15 @@ lazy_static! {
 impl SongID {
     fn new() -> SongID {
         // TODO: let the database do this for us
-        // TODO: assert < 0x7FFFFFFFFFFFFFF0 or so?
-        SongID { inner: NEXT_SONG.fetch_add(1, Ordering::Relaxed) }
+        let inner = NEXT_SONG.fetch_add(1, Ordering::Relaxed);
+        assert!(inner < 0x7FFFFFFFFFFFFFF0u64);
+        SongID { inner }
     }
-    pub fn from_db(v: u64) -> SongID {
+    pub fn from_inner(v: u64) -> SongID {
         SongID { inner: v }
+    }
+    pub fn as_inner(&self) -> u64 {
+        self.inner
     }
 }
 
@@ -150,6 +154,7 @@ fn munch_ffmpeg_metadata(in_meta: &BTreeMap<String, String>,
     let mut ret = BTreeMap::new();
     ret.insert("unchecked".to_owned(), "true".to_owned());
     for (k, v) in in_meta.iter() {
+        // TODO: maintain Unicode NFD
         if is_safe_raw_meta(k) { ret.insert(k.to_owned(), v.to_owned()); }
         else { ret.insert("raw_".to_owned() + k, v.to_owned()); }
     }
