@@ -411,25 +411,28 @@ impl AVFormat {
         }
         unsafe { ff::avcodec_flush_buffers(self.codec_ctx) };
         // eprintln!("Seeking to {} = {}!", target, target_timestamp);
+        self.leftovers.clear();
         let mut leftovers = Vec::new();
-        self.decode_some(|start_time, sample_rate, channel_count, mut buf| {
-            let end_time = start_time + (buf.len() / channel_count as usize)
-                as f64 / sample_rate;
-            if end_time < target {
-                // do nothing
-            }
-            else if start_time >= target {
-                // pure leftover!
-                leftovers.push((start_time, sample_rate,
-                                channel_count, buf));
-            }
-            else {
-                let cutoff_index = ((target - start_time) * sample_rate)
-                    .floor() as usize * channel_count as usize;
-                buf.drain(..cutoff_index);
-                leftovers.push((target, sample_rate, channel_count, buf));
-            }
-        });
+        // repeat until we start getting data or we run out of data
+        while leftovers.len() == 0 &&
+            self.decode_some(|start_time, sample_rate, channel_count, mut buf|{
+                let end_time = start_time + (buf.len() / channel_count
+                                             as usize) as f64 / sample_rate;
+                if end_time < target {
+                    // do nothing
+                }
+                else if start_time >= target {
+                    // pure leftover!
+                    leftovers.push((start_time, sample_rate,
+                                    channel_count, buf));
+                }
+                else {
+                    let cutoff_index = ((target - start_time) * sample_rate)
+                        .ceil() as usize * channel_count as usize;
+                    buf.drain(..cutoff_index);
+                    leftovers.push((target, sample_rate, channel_count, buf));
+                }
+            }) {}
         // Do a very fast fade-in over the first leftover frame (if any)
         if let Some((_, _, channel_count, buf))
         = leftovers.get_mut(0) {
