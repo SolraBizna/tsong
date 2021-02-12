@@ -410,7 +410,7 @@ impl AVFormat {
             },
         }
         unsafe { ff::avcodec_flush_buffers(self.codec_ctx) };
-        eprintln!("Seeking to {} = {}!", target, target_timestamp);
+        // eprintln!("Seeking to {} = {}!", target, target_timestamp);
         let mut leftovers = Vec::new();
         self.decode_some(|start_time, sample_rate, channel_count, mut buf| {
             let end_time = start_time + (buf.len() / channel_count as usize)
