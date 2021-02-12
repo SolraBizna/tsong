@@ -33,6 +33,11 @@ pub fn open_database() -> anyhow::Result<()> {
             // eprintln!("Initialized database from schema.");
         },
         1 => {
+            // TODO: prompt user for upgrades?
+            eprintln!("Updating database from schema version 1.");
+            database.execute_batch(include_str!("sql/update_1_to_2.sql"))?;
+        },
+        2 => {
             // eprintln!("Database did not require initialization.");
         },
         _ => return Err(anyhow!("Unknown database format version. (Was it \
@@ -79,8 +84,8 @@ pub fn open_database() -> anyhow::Result<()> {
     let mut get_playlists = database.prepare("SELECT id, parent_id, \
                                               parent_order, name, rule_code, \
                                               manually_added_ids, columns, \
-                                              sort_order, shuffled FROM \
-                                              Playlists;")?;
+                                              sort_order, shuffled, playmode \
+                                              FROM Playlists;")?;
     let mut rows = get_playlists.query(rusqlite::NO_PARAMS)?;
     while let Some(row) = rows.next()? {
         let id: i64 = row.get_unwrap(0);
@@ -92,6 +97,7 @@ pub fn open_database() -> anyhow::Result<()> {
         let columns: Option<Vec<u8>> = row.get_unwrap(6);
         let sort_order: Option<String> = row.get_unwrap(7);
         let shuffled: Option<bool> = row.get_unwrap(8);
+        let playmode: Option<i64> = row.get_unwrap(9);
         // massage the returned data
         let id = PlaylistID::from_inner(id as u64);
         let parent_id = parent_id.map(|x| x as u64)
@@ -111,9 +117,11 @@ pub fn open_database() -> anyhow::Result<()> {
             None => playlist::DEFAULT_SORT_ORDER.clone(),
         };
         let shuffled = shuffled.unwrap_or(false);
+        let playmode = Playmode::from_db_value(playmode.unwrap_or(0));
         playlist::add_playlist_from_db(id, parent_id, parent_order, name,
-                                       rule_code, shuffled, manually_added_ids,
-                                       columns, sort_order);
+                                       rule_code, shuffled, playmode,
+                                       manually_added_ids, columns,
+                                       sort_order);
     }
     drop(rows);
     drop(get_playlists);
@@ -155,6 +163,15 @@ pub fn update_playlist_shuffled(id: PlaylistID, shuffled: bool) {
     dbtry(database.execute("UPDATE Playlists SET shuffled = ? \
                             WHERE id = ?;",
                            params![shuffled, id.as_inner() as i64]));
+}
+
+pub fn update_playlist_playmode(id: PlaylistID, playmode: Playmode) {
+    let lock = DATABASE.lock();
+    let database = lock.as_ref().unwrap().as_ref().unwrap().borrow_mut();
+    dbtry(database.execute("UPDATE Playlists SET playmode = ? \
+                            WHERE id = ?;",
+                           params![playmode.to_db_value(),
+                                   id.as_inner() as i64]));
 }
 
 pub fn update_playlist_parent_order(id: PlaylistID, order: u64) {

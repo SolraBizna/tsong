@@ -1,4 +1,4 @@
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;
 
 CREATE TABLE PhysicalFiles(
        id BINARY(16) PRIMARY KEY,
@@ -24,7 +24,8 @@ CREATE TABLE Playlists(
        manually_added_ids BLOB,
        columns BLOB,
        sort_order BLOB,
-       shuffled BOOLEAN
+       shuffled BOOLEAN,
+       playmode TINYINT
 );
 
 INSERT INTO Playlists(parent_order, name, rule_code)

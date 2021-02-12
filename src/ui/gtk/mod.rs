@@ -60,6 +60,9 @@ mod fallback {
     pub const ROLLUP: &str = "\u{1F783}\u{FE0E}";
     pub const ROLLDOWN: &str = "\u{1F781}\u{FE0E}";
     pub const SETTINGS: &str = "\u{2699}\u{FE0E}";
+    pub const SHUFFLE: &str = "\u{1F500}\u{FE0E}";
+    pub const LOOP: &str = "\u{1F501}\u{FE0E}";
+    pub const LOOP_ONE: &str = "\u{1F502}\u{FE0E}";
     pub const PREV: &str = "\u{1F844}\u{FE0E}";
     pub const NEXT: &str = "\u{1F846}\u{FE0E}";
     // These don't look good...
@@ -74,7 +77,6 @@ struct Controller {
     control_box: gtk::Box,
     delete_playlist_button: ToolButton,
     last_built_playlist: Option<PlaylistRef>,
-    loop_button: Button,
     new_playlist_button: ToolButton,
     next_button: Button,
     osd: Label,
@@ -87,6 +89,7 @@ struct Controller {
     playlist_view: TreeView,
     playlists_model: TreeStore,
     playlists_view: TreeView,
+    playmode_button: ToggleButton,
     prev_button: Button,
     rollup_button: Button,
     rollup_grid: Grid,
@@ -102,6 +105,9 @@ struct Controller {
     next_icon: Option<Image>,
     rollup_icon: Option<Image>,
     rolldown_icon: Option<Image>,
+    shuffle_icon: Option<Image>,
+    loop_icon: Option<Image>,
+    loop_one_icon: Option<Image>,
     scan_thread: ScanThread,
     rolled_down_height: i32,
     me: Option<Weak<RefCell<Controller>>>,
@@ -118,7 +124,7 @@ fn set_image(button: &Button, icon: &Option<Image>, fallback: &str) {
 impl Controller {
     pub fn new(rollup_button: Button, settings_button: Button,
                prev_button: Button, next_button: Button,
-               shuffle_button: ToggleButton, loop_button: Button,
+               shuffle_button: ToggleButton, playmode_button: ToggleButton,
                play_button: Button, volume_button: VolumeButton,
                rollup_grid: Grid, new_playlist_button: ToolButton,
                delete_playlist_button: ToolButton,
@@ -144,7 +150,7 @@ impl Controller {
         let _ = playlist_name_cell.set_property("scale", &0.80);
         let nu = Rc::new(RefCell::new(Controller {
             rollup_button, settings_button, prev_button, next_button,
-            shuffle_button, loop_button, play_button, volume_button,
+            shuffle_button, playmode_button, play_button, volume_button,
             playlists_view, playlist_view, playlist_code,
             playlists_model, playlist_model, playlist_stats, osd,
             scan_spinner, scan_thread, rollup_grid, control_box,
@@ -153,6 +159,7 @@ impl Controller {
             prev_icon: None, next_icon: None,
             play_icon: None, pause_icon: None,
             rollup_icon: None, rolldown_icon: None,
+            loop_icon: None, loop_one_icon: None, shuffle_icon: None,
             active_playlist: None, playlist_generation: Default::default(),
             last_built_playlist: None, me: None,
             rolled_down_height: 400,
@@ -168,7 +175,6 @@ impl Controller {
             .set_sensitive(this.delete_playlist_button_should_be_sensitive());
         this.reload_icons();
         this.settings_button.set_sensitive(false);
-        this.loop_button.set_sensitive(false);
         this.playlists_view.append_column(&this.playlist_name_column);
         this.volume_button.connect_value_changed(|_, value| {
             prefs::set_volume((value * 100.0).floor() as i32);
@@ -214,6 +220,11 @@ impl Controller {
         this.shuffle_button.connect_clicked(move |_| {
             let _ = controller.try_borrow_mut()
                 .map(|mut x| x.clicked_shuffle());
+        });
+        let controller = nu.clone();
+        this.playmode_button.connect_clicked(move |_| {
+            let _ = controller.try_borrow_mut()
+                .map(|mut x| x.clicked_playmode());
         });
         let controller = nu.clone();
         this.new_playlist_button.connect_clicked(move |_| {
@@ -274,10 +285,14 @@ impl Controller {
                 self.playlist_model = None;
                 self.playlist_view.set_model::<ListStore>(None);
                 self.playlist_generation.destroy();
+                self.shuffle_button.set_sensitive(false);
+                self.shuffle_button.set_active(false);
+                self.update_playmode_button();
                 return
             },
         };
         let playlist = playlist_ref.maybe_refreshed();
+        self.shuffle_button.set_sensitive(true);
         self.shuffle_button.set_active(playlist.is_shuffled());
         self.playlist_generation = playlist.get_playlist_generation();
         let mut types = Vec::with_capacity(playlist.get_columns().len() + 2);
@@ -389,6 +404,8 @@ impl Controller {
                 self.playlist_stats.set_label(&t);
             }
         }
+        drop(playlist);
+        self.update_playmode_button();
     }
     fn reload_icons(&mut self) {
         // TODO: reload icons when theme is changed
@@ -400,6 +417,9 @@ impl Controller {
         self.pause_icon = get_icon("tsong-pause");
         self.rollup_icon = get_icon("tsong-rollup");
         self.rolldown_icon = get_icon("tsong-rolldown");
+        self.shuffle_icon = get_icon("tsong-shuffle");
+        self.loop_icon = get_icon("tsong-loop");
+        self.loop_one_icon = get_icon("tsong-loop-one");
         set_image(&self.prev_button, &self.prev_icon, fallback::PREV);
         set_image(&self.next_button, &self.next_icon, fallback::NEXT);
         if playback::get_playback_status().is_playing() {
@@ -416,6 +436,10 @@ impl Controller {
             set_image(&self.rollup_button, &self.rolldown_icon,
                       fallback::ROLLDOWN);
         }
+        set_image(self.shuffle_button.upcast_ref(), &self.shuffle_icon,
+                  fallback::SHUFFLE);
+        set_image(self.playmode_button.upcast_ref(), &self.loop_icon,
+                  fallback::LOOP);
     }
     fn activate_playlist_by_path(&mut self, wo: &TreePath) {
         let id = match self.playlists_model.get_iter(wo)
@@ -593,8 +617,43 @@ impl Controller {
     }
     fn clicked_shuffle(&mut self) -> Option<()> {
         let playlist = self.active_playlist.as_ref()?;
-        playlist.write().unwrap().toggle_shuffle();
+        self.shuffle_button.set_active(playlist.write().unwrap()
+                                       .toggle_shuffle());
         self.rebuild_playlist_view();
+        None
+    }
+    fn clicked_playmode(&mut self) -> Option<()> {
+        let playlist = self.active_playlist.as_ref()?;
+        playlist.write().unwrap().bump_playmode();
+        self.update_playmode_button();
+        self.rebuild_playlist_view();
+        None
+    }
+    fn update_playmode_button(&mut self) -> Option<()> {
+        match self.active_playlist.as_ref() {
+            None => {
+                self.playmode_button.set_sensitive(false);
+                self.playmode_button.set_active(false);
+                set_image(self.playmode_button.upcast_ref(),
+                          &self.loop_icon,
+                          fallback::LOOP);
+            },
+            Some(playlist) => {
+                self.playmode_button.set_sensitive(true);
+                let playmode = playlist.read().unwrap().get_playmode();
+                if playmode == Playmode::LoopOne {
+                    set_image(self.playmode_button.upcast_ref(),
+                              &self.loop_one_icon,
+                              fallback::LOOP_ONE);
+                }
+                else {
+                    set_image(self.playmode_button.upcast_ref(),
+                              &self.loop_icon,
+                              fallback::LOOP);
+                }
+                self.playmode_button.set_active(playmode != Playmode::End);
+            }
+        }
         None
     }
     fn clicked_new_playlist(&mut self) -> Option<()> {
@@ -833,12 +892,12 @@ pub fn go() {
         playlist_meta_box.pack_end(&BoxBuilder::new().build(), false, false, 0);
         // Button to change shuffle mode:
         let shuffle_button = ToggleButtonBuilder::new()
-            .label("\u{1F500}\u{FE0E}").build();
+            .name("shuffle").build();
         playlist_meta_box.pack_start(&shuffle_button, false, false, 0);
         // Button to change loop mode:
-        let loop_button = ButtonBuilder::new()
-            .label("\u{1F5D8}\u{FE0E}").build();
-        playlist_meta_box.pack_end(&loop_button, false, false, 0);
+        let playmode_button = ToggleButtonBuilder::new()
+            .name("playmode").build();
+        playlist_meta_box.pack_end(&playmode_button, false, false, 0);
         // The playlist code:
         let playlist_code = EntryBuilder::new().hexpand(true)
             .placeholder_text("Manually added songs only")
@@ -871,7 +930,7 @@ pub fn go() {
         window.show_all();
         // Controller will hook itself in and keep track of its own lifetime
         let _ = Controller::new(rollup_button, settings_button, prev_button,
-                                next_button, shuffle_button, loop_button,
+                                next_button, shuffle_button, playmode_button,
                                 play_button, volume_slider, rollup_grid,
                                 new_playlist_button, delete_playlist_button,
                                 playlists_view, playlist_view,

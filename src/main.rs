@@ -15,7 +15,7 @@ pub use reference::Reference;
 pub use generation::{GenerationTracker, GenerationValue, NOT_GENERATED};
 pub use physical::{PhysicalFile, PhysicalFileRef, FileID};
 pub use logical::{LogicalSong, LogicalSongRef, SongID};
-pub use playlist::{Playlist, PlaylistRef, PlaylistID};
+pub use playlist::{Playlist, PlaylistRef, PlaylistID, Playmode};
 pub use playback::{PlaybackCommand, PlaybackStatus};
 pub use scan::ScanThread;
 

@@ -15,6 +15,35 @@ use rand::prelude::*;
 
 pub type PlaylistRef = Reference<Playlist>;
 
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+pub enum Playmode {
+    End, Loop, LoopOne
+}
+
+impl Playmode {
+    pub fn to_db_value(&self) -> i8 {
+        match self {
+            Playmode::End => 0,
+            Playmode::Loop => 1,
+            Playmode::LoopOne => 2,
+        }
+    }
+    pub fn from_db_value(n: i64) -> Playmode {
+        match n {
+            1 => Playmode::Loop,
+            2 => Playmode::LoopOne,
+            _ => Playmode::End, // be tolerant
+        }
+    }
+    pub fn bump(&self) -> Playmode {
+        match self {
+            Playmode::End => Playmode::Loop,
+            Playmode::Loop => Playmode::LoopOne,
+            Playmode::LoopOne => Playmode::End
+        }
+    }
+}
+
 /// A playlist ID is a non-zero ID, unique *within the database*, that
 /// identifies a particular unique playlist.
 #[derive(Clone,Copy,PartialEq,Eq,PartialOrd,Ord,Hash)]
@@ -76,6 +105,8 @@ pub struct Playlist {
     sort_order: Vec<(String,bool)>,
     /// True if shuffled, false if sorted.
     shuffled: bool,
+    /// Playback mode (whether and how to loop).
+    playmode: Playmode,
     // not serialized in database
     /// The logical song generation last time we got refreshed.
     library_generation: GenerationValue,
@@ -151,6 +182,16 @@ impl Playlist {
     }
     pub fn get_sort_order(&self) -> &[(String,bool)] { &self.sort_order[..] }
     pub fn get_children(&self) -> &[PlaylistRef] { &self.children[..] }
+    pub fn get_playmode(&self) -> Playmode { self.playmode }
+    pub fn set_playmode(&mut self, nu: Playmode) {
+        self.playmode = nu;
+        db::update_playlist_playmode(self.id, nu)
+    }
+    pub fn bump_playmode(&mut self) -> Playmode {
+        let nu = self.playmode.bump();
+        self.set_playmode(nu);
+        nu
+    }
     /// The user clicked on a column heading.
     /// - Shuffle is disabled, if enabled.
     /// - If this is not in the order at all, add it to the front in ascending
@@ -324,7 +365,7 @@ pub fn create_new_playlist() -> anyhow::Result<PlaylistRef> {
     drop(top_level_playlists);
     let new_id = db::create_playlist(&new_playlist_name, new_order)?;
     Ok(add_playlist_from_db(new_id, None, new_order, new_playlist_name,
-                            String::new(), false, Vec::new(),
+                            String::new(), false, Playmode::End, Vec::new(),
                             DEFAULT_COLUMNS.clone(),
                             DEFAULT_SORT_ORDER.clone()))
 }
@@ -334,14 +375,14 @@ pub fn create_new_playlist() -> anyhow::Result<PlaylistRef> {
 pub fn add_playlist_from_db(id: PlaylistID, parent_id: Option<PlaylistID>,
                             parent_order: u64,
                             name: String, rule_code: String,
-                            shuffled: bool,
+                            shuffled: bool, playmode: Playmode,
                             manually_added_ids: Vec<SongID>,
                             columns: Vec<Column>,
                             sort_order: Vec<(String,bool)>)
     -> PlaylistRef {
     let ret = PlaylistRef::new(
         Playlist { id, parent_id, parent_order, name, rule_code,
-                   manually_added_ids, columns, sort_order, shuffled,
+                   manually_added_ids, columns, sort_order, shuffled, playmode,
                    library_generation: NOT_GENERATED,
                    self_generation: GenerationTracker::new(),
                    unsorted_songs: Vec::new(), sorted_songs: Vec::new(),

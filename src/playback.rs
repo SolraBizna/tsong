@@ -257,11 +257,11 @@ fn playback_callback(args: OutputCallbackArgs<f32>) -> StreamCallbackResult {
             // try to do the reverse we could end up with deadlock.
             // If we couldn't get the lock, assume that playback is ongoing.
             // We'll play some extra silence, but that's okay.
-            // TODO: "predicted playback status" is what matters here, not
-            // the user-visible status
-            let status = STATE.try_lock().map(|x| x.status)
-                .unwrap_or(PlaybackStatus::Playing);
-            if status != PlaybackStatus::Playing  {
+            let playback_over = STATE.try_lock().map(|x| {
+                x.status != PlaybackStatus::Playing
+                    || x.future_song.is_none()
+            }).unwrap_or(false);
+            if playback_over {
                 send_callback_report(now, PlaybackFinished);
             }
             // TODO: underrun detection
@@ -310,7 +310,7 @@ fn playback_thread(state: Arc<Mutex<InternalState>>,
                             // Otherwise, play the FIRST SONG.
                             let mut state = state.lock().unwrap();
                             if state.future_song.is_none() {
-                                state.next_song();
+                                state.next_song(true);
                                 state.active_song = state.future_song
                                     .as_ref().map(|x| (x.clone(), 0.0));
                             }
@@ -323,7 +323,7 @@ fn playback_thread(state: Arc<Mutex<InternalState>>,
                             // Queue the next song to be played, but don't
                             // start playing it yet.
                             let mut state = state.lock().unwrap();
-                            state.next_song();
+                            state.next_song(true);
                             state.active_song = state.future_song
                                 .as_ref().map(|x| (x.clone(), 0.0));
                             state.future_stream = None;
@@ -432,7 +432,7 @@ fn playback_thread(state: Arc<Mutex<InternalState>>,
                                     // play the next song, AS THE USER HEARS
                                     state.future_stream = None;
                                     state.future_song = state.active_song.as_mut().map(|(x,_)| x.clone());
-                                    state.next_song();
+                                    state.next_song(true);
                                     break 'alive_loop;
                                 },
                                 Prev => {
@@ -542,6 +542,7 @@ fn decode_some_frames(state: &Arc<Mutex<InternalState>>) {
     while sample_count < SAMPLES_AHEAD {
         // TODO: end of playback
         let mut state = state.lock().unwrap();
+        if state.future_song.is_none() { break }
         sample_count += state.decode_some_frames(SAMPLES_AHEAD - sample_count);
     }
 }
@@ -573,9 +574,10 @@ impl InternalState {
     }
     /// Goes to the next song in the playlist, which might involve looping
     /// and/or reshuffling the playlist.
-    fn next_song(&mut self) {
+    fn next_song(&mut self, even_if_looping_one: bool) {
         let playlist = self.future_playlist.as_ref().unwrap()
             .maybe_refreshed();
+        let playmode = playlist.get_playmode();
         let songs = playlist.get_songs();
         let cur_index = match self.future_song.as_ref() {
             Some(future_song) =>
@@ -583,14 +585,35 @@ impl InternalState {
             None => None,
         };
         let next_index = match cur_index {
-            None => 0,
-            Some(x) if x == songs.len() - 1 => {
-                // TODO: reshuffle, loop flag
-                0
+            None => Some(0),
+            Some(x) if playmode == Playmode::LoopOne && !even_if_looping_one=>{
+                Some(x)
             },
-            Some(x) => x + 1,
+            Some(x) if x == songs.len() - 1 => {
+                if playmode == Playmode::End {
+                    None
+                }
+                else {
+                    if playlist.is_shuffled() {
+                        // TODO: parkinglot lets us upgrade a read lock into
+                        // a write lock
+                        drop(playlist);
+                        let mut playlist = self.future_playlist.as_ref()
+                            .unwrap().write().unwrap();
+                        playlist.resort();
+                        self.future_song = playlist.get_songs().get(0)
+                            .cloned();
+                        self.future_stream = None;
+                        return
+                    }
+                    else {
+                        Some(0)
+                    }
+                }
+            },
+            Some(x) => Some(x + 1),
         };
-        self.future_song = songs.get(next_index).cloned();
+        self.future_song = next_index.and_then(|x| songs.get(x)).cloned();
         self.future_stream = None;
     }
     /// Goes to the previous song in the playlist, or start the current one
@@ -631,7 +654,7 @@ impl InternalState {
                     eprintln!("Error while trying to open {:?}\n{:?}",
                               self.future_song.as_ref().unwrap(), x);
                     self.future_stream = None;
-                    self.next_song();
+                    self.next_song(true);
                     return 0;
                 }
             }
@@ -640,7 +663,7 @@ impl InternalState {
             let song_id = self.future_song.as_ref().unwrap().read().unwrap().get_id();
             if let Some(ref mut av) = self.future_stream {
                 let mut decoded_so_far = 0;
-                while decoded_so_far < sample_count {
+                while decoded_so_far < sample_count && !self.future_song.is_none() {
                      let more_left = av.decode_some(|time, sample_rate, channel_count, data| {
                         assert!(data.len() > 0);
                         assert!(channel_count > 0 && channel_count < 32);
@@ -651,7 +674,7 @@ impl InternalState {
                         });
                     });
                     if !more_left {
-                        self.next_song();
+                        self.next_song(false);
                         break
                     }
                 }
