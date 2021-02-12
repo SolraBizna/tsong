@@ -464,7 +464,7 @@ fn expand_float_packed_audio(frame: &ff::AVFrame, buf: &mut Vec<f32>){
 }
 
 fn expand_float_planar_audio(frame: &ff::AVFrame, buf: &mut Vec<f32>) {
-    assert!(frame.channels > 1);
+    assert!(frame.channels >= 1);
     let mut data_ptrs: Vec<&[f32]> = Vec::with_capacity(frame.channels as usize);
     for c in 0 .. frame.channels as usize {
         data_ptrs.push(unsafe {
@@ -492,7 +492,7 @@ fn expand_packed_audio<T: Expandable>(frame: &ff::AVFrame, buf: &mut Vec<f32>){
 }
 
 fn expand_planar_audio<T: Expandable>(frame: &ff::AVFrame, buf: &mut Vec<f32>){
-    assert!(frame.channels > 1);
+    assert!(frame.channels >= 1);
     let mut data_ptrs: Vec<&[T]> = Vec::with_capacity(frame.channels as usize);
     for c in 0 .. frame.channels as usize {
         data_ptrs.push(unsafe {
