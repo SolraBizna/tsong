@@ -7,8 +7,9 @@ use lazy_static::lazy_static;
 
 use std::{
     collections::{BTreeMap, HashMap},
+    ffi::OsStr,
     fmt, fmt::{Display, Debug, Formatter},
-    sync::{Arc, Mutex, RwLock, atomic::{Ordering, AtomicU64}, RwLockReadGuard},
+    sync::{Arc, Mutex, RwLock, RwLockReadGuard},
 };
 
 pub type LogicalSongRef = Reference<LogicalSong>;
@@ -32,17 +33,7 @@ impl Debug for SongID {
     }
 }
 
-lazy_static! {
-    static ref NEXT_SONG: AtomicU64 = 1.into();
-}
-
 impl SongID {
-    fn new() -> SongID {
-        // TODO: let the database do this for us
-        let inner = NEXT_SONG.fetch_add(1, Ordering::Relaxed);
-        assert!(inner < 0x7FFFFFFFFFFFFFF0u64);
-        SongID { inner }
-    }
     pub fn from_inner(v: u64) -> SongID {
         SongID { inner: v }
     }
@@ -140,10 +131,15 @@ lazy_static! {
         = RwLock::new(HashMap::new());
 }
 
-/// Returns whether the passed metadata key is "safe" to consume raw from
-/// FFMPEG metadata.
-fn is_safe_raw_meta(k: &str) -> bool {
-    k == "title" || k == "artist" || k == "album"
+/// Returns the metadata key to use for a raw FFMPEG metadata key, or `None`
+/// if the given key is "unsafe".
+fn map_raw_meta(k: &str) -> Option<&str> {
+    match k {
+        "title" | "artist" | "album" => Some(k),
+        "disc" => Some("disc#"),
+        "track" => Some("track#"),
+        _ => None,
+    }
 }
 
 /// Takes some raw, FFMPEG metadata, and returns the Tsong metadata we want to
@@ -155,8 +151,10 @@ fn munch_ffmpeg_metadata(in_meta: &BTreeMap<String, String>,
     ret.insert("unchecked".to_owned(), "true".to_owned());
     for (k, v) in in_meta.iter() {
         // TODO: maintain Unicode NFD
-        if is_safe_raw_meta(k) { ret.insert(k.to_owned(), v.to_owned()); }
-        else { ret.insert("raw_".to_owned() + k, v.to_owned()); }
+        match map_raw_meta(k) {
+            Some(k) => ret.insert(k.to_owned(), v.to_owned()),
+            None => ret.insert("raw_".to_owned() + k, v.to_owned()),
+        };
     }
     ret.insert("duration".to_owned(), format!("{}", duration));
     ret
@@ -223,31 +221,38 @@ pub fn incorporate_physical(file_id: &FileID,
         let mut logical_song = possibility.0.write().unwrap();
         logical_song.physical_files.push(*file_id);
         logical_song.similarity_recs.push(similarity_rec);
+        db::update_song_physical_files(logical_song.id,
+                                       &logical_song.physical_files);
     }
-    // TODO: soft match
+    // TODO: soft matches
     else {
         // no match! make a new song
-        let song_id = SongID::new();
-        let new_song = LogicalSongRef::new(LogicalSong {
-            id: song_id,
+        let new_song_ref = LogicalSongRef::new(LogicalSong {
+            id: SongID::from_inner(0),
             user_metadata: munch_ffmpeg_metadata(&metadata,
                                                  similarity_rec.duration),
             physical_files: vec![*file_id],
             duration: similarity_rec.duration,
             similarity_recs: vec![similarity_rec.clone()],
         });
-        eprintln!("New song! {:?}", new_song.read().unwrap().user_metadata.get("title"));
-        LOGICAL_SONGS.write().unwrap().push(new_song.clone());
-        SONGS_BY_SONG_ID.write().unwrap().insert(song_id, new_song.clone());
-        SONGS_BY_FILE_ID.write().unwrap().insert(*file_id, new_song.clone());
+        let mut new_song = new_song_ref.write().unwrap();
+        let song_id = db::add_song(&new_song.user_metadata,
+                                   &new_song.physical_files,
+                                   new_song.duration).unwrap(); // TODO: errors
+        new_song.id = song_id;
+        eprintln!("New song! {:?}", new_song.user_metadata.get("title"));
+        drop(new_song);
+        LOGICAL_SONGS.write().unwrap().push(new_song_ref.clone());
+        SONGS_BY_SONG_ID.write().unwrap().insert(song_id,new_song_ref.clone());
+        SONGS_BY_FILE_ID.write().unwrap().insert(*file_id,new_song_ref.clone());
         SONGS_BY_P_FILENAME.write().unwrap().entry(similarity_rec.filename)
-            .or_insert_with(Vec::new).push(new_song.clone());
+            .or_insert_with(Vec::new).push(new_song_ref.clone());
         SONGS_BY_P_TITLE.write().unwrap().entry(similarity_rec.title)
-            .or_insert_with(Vec::new).push(new_song.clone());
+            .or_insert_with(Vec::new).push(new_song_ref.clone());
         SONGS_BY_P_ARTIST.write().unwrap().entry(similarity_rec.artist)
-            .or_insert_with(Vec::new).push(new_song.clone());
+            .or_insert_with(Vec::new).push(new_song_ref.clone());
         SONGS_BY_P_ALBUM.write().unwrap().entry(similarity_rec.album)
-            .or_insert_with(Vec::new).push(new_song.clone());
+            .or_insert_with(Vec::new).push(new_song_ref.clone());
         GENERATION.bump();
     }
 }
@@ -297,7 +302,9 @@ impl LogicalSong {
     /// differences, and a different one is chosen to be played...
     pub fn set_duration(&mut self, nu: u32) {
         if self.duration != nu {
-            // TODO: database update
+            db::update_song_duration(self.id, nu);
+            self.user_metadata.insert("duration".to_owned(), format!("{}",nu));
+            // TODO: database update (metadata)
             self.duration = nu;
         }
     }
@@ -343,4 +350,55 @@ impl LogicalSongRef {
             self.write().unwrap().set_duration(durr)
         }
     }
+}
+
+/// Called by the database as songs are loaded.
+pub fn add_song_from_db(id: SongID, user_metadata: BTreeMap<String, String>,
+                        physical_files: Vec<FileID>, duration: u32) {
+    let neu_ref = LogicalSongRef::new(LogicalSong {
+        similarity_recs: Vec::new(),
+        id, user_metadata, physical_files, duration,
+    });
+    let mut neu = neu_ref.write().unwrap();
+    LOGICAL_SONGS.write().unwrap().push(neu_ref.clone());
+    SONGS_BY_SONG_ID.write().unwrap().insert(id, neu_ref.clone());
+    let mut songs_by_file_id = SONGS_BY_FILE_ID.write().unwrap();
+    let mut songs_by_p_filename = SONGS_BY_P_FILENAME.write().unwrap();
+    let mut songs_by_p_title = SONGS_BY_P_TITLE.write().unwrap();
+    let mut songs_by_p_artist = SONGS_BY_P_ARTIST.write().unwrap();
+    let mut songs_by_p_album = SONGS_BY_P_ALBUM.write().unwrap();
+    let mut similarity_recs = Vec::with_capacity(neu.physical_files.len());
+    for id in neu.physical_files.iter() {
+        let file_ref = match physical::get_file_by_id(id) {
+            Some(x) => x,
+            None => {
+                eprintln!("WARNING: database referenced missing file ID ({})",
+                          id);
+                continue
+            },
+        };
+        let file = file_ref.read().unwrap();
+        for path in file.get_absolute_paths() {
+            let filename = path.file_name().map(OsStr::to_string_lossy)
+                .unwrap();
+            let metadata = file.get_raw_metadata();
+            let similarity_rec: SimilarityRec = SimilarityRec::new(
+                filename.to_owned().into(),
+                file.get_duration(),
+                &metadata
+            );
+            songs_by_p_filename.entry(similarity_rec.filename.clone())
+                .or_insert_with(Vec::new).push(neu_ref.clone());
+            songs_by_p_title.entry(similarity_rec.title.clone())
+                .or_insert_with(Vec::new).push(neu_ref.clone());
+            songs_by_p_artist.entry(similarity_rec.artist.clone())
+                .or_insert_with(Vec::new).push(neu_ref.clone());
+            songs_by_p_album.entry(similarity_rec.album.clone())
+                .or_insert_with(Vec::new).push(neu_ref.clone());
+            similarity_recs.push(similarity_rec);
+        }
+        songs_by_file_id.insert(*id, neu_ref.clone());
+    }
+    neu.similarity_recs = similarity_recs;
+    GENERATION.bump();
 }

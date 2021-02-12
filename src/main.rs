@@ -21,7 +21,7 @@ pub use scan::ScanThread;
 
 fn main() {
     prefs::read().unwrap();
-    db::load_database().unwrap();
+    db::open_database().unwrap();
     ffmpeg::init();
     ui::go();
 }

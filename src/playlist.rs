@@ -6,7 +6,7 @@ use std::{
     collections::{HashSet, HashMap},
     cmp::Ordering,
     fmt, fmt::{Debug,Display,Formatter},
-    sync::{atomic::AtomicU64, RwLock, RwLockReadGuard, RwLockWriteGuard},
+    sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
 use mlua::Lua;
@@ -34,17 +34,7 @@ impl Debug for PlaylistID {
     }
 }
 
-lazy_static! {
-    static ref NEXT_PLAYLIST: AtomicU64 = 2401.into();
-}
-
 impl PlaylistID {
-    fn new() -> PlaylistID {
-        // TODO: let the database do this for us
-        let inner = NEXT_PLAYLIST.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        assert!(inner < 0x7FFFFFFFFFFFFFF0u64);
-        PlaylistID { inner }
-    }
     pub fn from_inner(v: u64) -> PlaylistID {
         PlaylistID { inner: v }
     }
@@ -109,6 +99,8 @@ lazy_static! {
     static ref PLAYLISTS_BY_ID
         : RwLock<HashMap<PlaylistID, PlaylistRef>>
         = RwLock::new(HashMap::new());
+    // note: if these ever become mutable, this slightly changes the meaning
+    // of the database schema
     pub static ref DEFAULT_COLUMNS
         : Vec<Column>
         = vec![
@@ -121,21 +113,32 @@ lazy_static! {
             Column{tag:"album".to_owned(),
                    width:117}
         ];
+    pub static ref DEFAULT_SORT_ORDER
+        : Vec<(String,bool)>
+        = vec![
+            ("disc#".to_owned(), false),
+            ("track#".to_owned(), false),
+            ("album".to_owned(), false),
+            ("title".to_owned(), false),
+        ];
 }
 
 impl Playlist {
     pub fn get_id(&self) -> PlaylistID { self.id }
     pub fn get_name(&self) -> &str { &self.name }
+    /// Changes the name of this playlist, and also updates the database.
     pub fn set_name(&mut self, neu: String) {
         self.name = neu;
-        // TODO: database update
+        db::update_playlist_name(self.id, &self.name)
     }
     pub fn get_rule_code(&self) -> &str { &self.rule_code }
+    /// Checks the validity of the given rule code. Returns:
+    /// - `Err("...")` → the rule code is invalid and we made no change
+    /// - `Ok(...)` → the rule code is valid and we made the change
     pub fn set_rule_code(&mut self, neu: String) -> Result<(), String> {
         self.refresh_with_code(Some(&neu))?;
         self.rule_code = neu;
-        // TODO: database update
-        Ok(())
+        Ok(db::update_playlist_rule_code(self.id, &self.rule_code))
     }
     pub fn get_columns(&self) -> &[Column] { &self.columns[..] }
     pub fn resize_column(&mut self, tag: &str, width: u32) {
@@ -172,14 +175,17 @@ impl Playlist {
             },
         }
         self.shuffled = false;
-        // TODO: database update
+        db::update_playlist_sort_order_and_disable_shuffle(self.id,
+                                                         &self.sort_order[..]);
         self.resort();
     }
-    /// The user wants to toggle shuffle mode.
-    pub fn toggle_shuffle(&mut self) {
+    /// The user wants to toggle shuffle mode. Returns whether shuffle is now
+    /// enabled
+    pub fn toggle_shuffle(&mut self) -> bool {
         self.shuffled = !self.shuffled;
-        // TODO: database update
+        db::update_playlist_shuffled(self.id, self.shuffled);
         self.resort();
+        self.shuffled
     }
     /// Returns true if the playlist is shuffled, false if it is sorted.
     pub fn is_shuffled(&self) -> bool {
@@ -307,16 +313,20 @@ impl Playlist {
     }
 }
 
-pub fn create_new_playlist() -> PlaylistRef {
+pub fn create_new_playlist() -> anyhow::Result<PlaylistRef> {
     // TODO: internationalize the default playlist name. (this is otherwise
     // going to be a really easy case to miss)
-    playlist::add_playlist_from_db(PlaylistID::new(), None, u64::MAX,
-                                   "New Playlist".to_owned(),
-                                   String::new(),
-                                   false,
-                                   Vec::new(),
-                                   DEFAULT_COLUMNS.clone(),
-                                   Vec::new())
+    let new_playlist_name = "New Playlist".to_owned();
+    let top_level_playlists = TOP_LEVEL_PLAYLISTS.read().unwrap();
+    let new_order = if top_level_playlists.len() == 0 { 0 }
+    else { top_level_playlists[top_level_playlists.len()-1].read().unwrap()
+           .parent_order+1 };
+    drop(top_level_playlists);
+    let new_id = db::create_playlist(&new_playlist_name, new_order)?;
+    Ok(add_playlist_from_db(new_id, None, new_order, new_playlist_name,
+                            String::new(), false, Vec::new(),
+                            DEFAULT_COLUMNS.clone(),
+                            DEFAULT_SORT_ORDER.clone()))
 }
 
 /// Add a new playlist, loaded from the database. You will need to call
@@ -361,7 +371,7 @@ fn redo_parent_orders(group: &mut[PlaylistRef]) {
     for n in 0..group.len() {
         let mut playlist = group[n].write().unwrap();
         if playlist.parent_order != n as u64 {
-            // TODO: database update
+            db::update_playlist_parent_order(playlist.id, n as u64);
             playlist.parent_order = n as u64;
         }
     }
@@ -428,7 +438,8 @@ fn delete_playlist_from(victim_ref: &PlaylistRef,
         let mut child = child_ref.write().unwrap();
         child.parent_id = victim.parent_id;
         child.parent_order = next_order;
-        // TODO: database update
+        db::update_playlist_parent_id_and_order(child.id, child.parent_id,
+                                                child.parent_order);
         siblings.push(child_ref.clone());
         next_order += 1;
     }
@@ -454,7 +465,7 @@ pub fn delete_playlist(victim_ref: PlaylistRef) {
         },
     }
     victim.parent_id = None;
-    // TODO: database update
+    db::delete_playlist(victim.id);
 }
 
 impl PlaylistRef {

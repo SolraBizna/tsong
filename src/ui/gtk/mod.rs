@@ -570,8 +570,8 @@ impl Controller {
         let value = self.playlists_model.get_value(&iter, 0);
         let playlist = value_to_playlist_id(value)
             .and_then(playlist::get_playlist_by_id)?;
-        playlist.write().unwrap().set_name(nu.to_owned());
         self.playlists_model.set_value(&iter, 1, &Value::from(nu));
+        playlist.write().unwrap().set_name(nu.to_owned());
         None
     }
     fn playlists_cursor_changed(&mut self) -> Option<()> {
@@ -598,7 +598,14 @@ impl Controller {
         None
     }
     fn clicked_new_playlist(&mut self) -> Option<()> {
-        let playlist = playlist::create_new_playlist();
+        let playlist = match playlist::create_new_playlist() {
+            Ok(x) => x,
+            Err(x) => {
+                // TODO: display error better
+                eprintln!("Unable to create playlist: {:?}", x);
+                return None
+            }
+        };
         let playlist = playlist.read().unwrap();
         let id = playlist.get_id();
         let playlists_model = &self.playlists_model;

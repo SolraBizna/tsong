@@ -5,10 +5,11 @@
 
 use crate::*;
 use lazy_static::lazy_static;
+use arrayref::array_ref;
 
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, hash_map::Entry},
     ffi::OsStr,
     fmt,
     fmt::{Debug, Display, Formatter},
@@ -32,8 +33,9 @@ pub type PhysicalFileRef = Reference<PhysicalFile>;
 /// hash.
 #[derive(Clone,Copy,PartialEq,Eq,PartialOrd,Ord,Hash)]
 pub struct FileID {
-    inner: [u8; sha256::HASHBYTES],
+    inner: [u8; ID_SIZE],
 }
+pub const ID_SIZE: usize = sha256::HASHBYTES;
 
 impl Display for FileID {
     fn fmt(&self, fmt: &mut Formatter<'_>) -> fmt::Result {
@@ -51,7 +53,15 @@ impl Debug for FileID {
 }
 
 impl FileID {
-    pub fn from_hash(bytes: &[u8; sha256::HASHBYTES]) -> FileID {
+    pub fn from_bytes(bytes: &[u8]) -> anyhow::Result<FileID> {
+        if bytes.len() == ID_SIZE {
+            Ok(FileID::from_hash(array_ref!(bytes, 0, ID_SIZE)))
+        }
+        else {
+            Err(anyhow!("File ID wasn't exactly {} bytes", ID_SIZE))
+        }
+    }
+    pub fn from_hash(bytes: &[u8; ID_SIZE]) -> FileID {
         FileID { inner: *bytes }
     }
     pub fn from_file<R: Read>(mut file: R) -> io::Result<FileID> {
@@ -65,6 +75,9 @@ impl FileID {
         }
         Ok(FileID { inner: hasher.finish(&[]) })
     }
+    pub fn as_bytes(&self) -> &[u8; ID_SIZE] {
+        &self.inner
+    }
 }
 
 /// A *physical file* is a file on the disk. It contains (from our perspective)
@@ -72,6 +85,7 @@ impl FileID {
 /// song correspond to different physical files.
 #[derive(Debug)]
 pub struct PhysicalFile {
+    // Serialized in database
     /// File's SHA-256 hash.
     id: FileID,
     /// File's size. Used to help ID a file during a scan.
@@ -84,13 +98,26 @@ pub struct PhysicalFile {
     /// as a shortcut (in combination with size) to prevent having to rescan
     /// every file on every startup.
     relative_paths: Vec<String>,
+    /// Raw metadata, exactly as returned by FFMPEG.
+    raw_meta: BTreeMap<String,String>,
+    // Not serialized in database
     /// All absolute paths under which we've seen this file since startup. Used
     /// to actually find the file when it's time to play.
     absolute_paths: Vec<PathBuf>,
-    /// Raw metadata, exactly as returned by FFMPEG.
-    raw_meta: BTreeMap<String,String>,
 }
-    
+
+impl PhysicalFile {
+    pub fn get_absolute_paths(&self) -> &[PathBuf] {
+        &self.absolute_paths[..]
+    }
+    pub fn get_raw_metadata(&self) -> &BTreeMap<String, String> {
+        &self.raw_meta
+    }
+    pub fn get_duration(&self) -> u32 {
+        self.duration
+    }
+}
+
 lazy_static! {
     // Deadlock avoidance lexical order:
     // - `PHYSICAL_FILES` lock
@@ -102,6 +129,44 @@ lazy_static! {
     static ref FILES_BY_RELATIVE_PATH
         : RwLock<HashMap<String, Vec<PhysicalFileRef>>>
         = RwLock::new(HashMap::new());
+}
+
+/// Called by the database during initial database load.
+pub fn add_file_from_db(id: FileID, size: u64, duration: u32,
+                        relative_paths: Vec<String>,
+                        raw_meta: BTreeMap<String, String>) {
+    let mut physical_files = PHYSICAL_FILES.write().unwrap();
+    let mut files_by_relative_path = FILES_BY_RELATIVE_PATH.write().unwrap();
+    let neu_ref = match physical_files.entry(id) {
+        Entry::Occupied(_) => {
+            eprintln!("WARNING: Ignoring PhysicalFile with duplicate ID from \
+                       database! (id = {})", id);
+            return
+        },
+        Entry::Vacant(ent) => {
+            let record = PhysicalFileRef::new(PhysicalFile {
+                id, size, raw_meta, duration, relative_paths,
+                absolute_paths: vec![],
+            });
+            ent.insert(record.clone());
+            record
+        },
+    };
+    for path in neu_ref.read().unwrap().relative_paths.iter() {
+        match files_by_relative_path.entry(path.to_owned()) {
+            Entry::Occupied(mut ent) => {
+                match ent.get().iter().find(|x| x.read().unwrap().id == id) {
+                    Some(_) => (),
+                    // TODO: assert that there are none with the same size but
+                    // a different ID
+                    None => ent.get_mut().push(neu_ref.clone()),
+                }
+            }
+            Entry::Vacant(ent) => {
+                ent.insert(vec![neu_ref.clone()]);
+            },
+        }
+    }
 }
 
 /// Called by the scanner when it first finds a file. Will return its file ID
@@ -138,7 +203,6 @@ pub fn scanned_file(id: &FileID, size: u64, _mtime: u64, duration: u32,
                     relative_path: &str, absolute_path: &Path,
                     raw_meta: BTreeMap<String,String>)
     -> anyhow::Result<()> {
-    use std::collections::hash_map::Entry;
     // Use writer locks because we're *fairly* sure we're gonna have to write
     // something...
     let record = {
@@ -165,9 +229,13 @@ pub fn scanned_file(id: &FileID, size: u64, _mtime: u64, duration: u32,
                     }
                     match record.relative_paths.iter()
                         .find(|x| *x == relative_path) {
-                            // TODO: db update
-                            None => record.relative_paths
-                                .push(relative_path.to_owned()),
+                            None => {
+                                record.relative_paths
+                                    .push(relative_path.to_owned());
+                                db::update_file_relative_paths(
+                                    &record.id,
+                                    &record.relative_paths);
+                            },
                             Some(_) => (),
                     }
                     record.absolute_paths.push(absolute_path.to_owned());
@@ -175,13 +243,17 @@ pub fn scanned_file(id: &FileID, size: u64, _mtime: u64, duration: u32,
                 ent.get().clone()
             },
             Entry::Vacant(ent) => {
-                let record = PhysicalFileRef::new(PhysicalFile {
+                let record_ref = PhysicalFileRef::new(PhysicalFile {
                     id: *id, size, raw_meta, duration,
                     relative_paths: vec![relative_path.to_owned()],
                     absolute_paths: vec![absolute_path.to_owned()],
                 });
-                ent.insert(record.clone());
-                record
+                ent.insert(record_ref.clone());
+                let record = record_ref.read().unwrap();
+                db::add_file(&record.id, record.size, &record.raw_meta,
+                             record.duration, &record.relative_paths);
+                drop(record);
+                record_ref
             },
         }
     };
@@ -215,7 +287,6 @@ pub fn open_stream(id: &FileID) -> Option<ffmpeg::AVFormat> {
     let files = PHYSICAL_FILES.read().unwrap();
     let file = files.get(id)?.read().unwrap();
     for path in file.absolute_paths.iter() {
-        // eprintln!("{:?}?", path);
         match ffmpeg::AVFormat::open_input(&path) {
             Ok(x) => return Some(x),
             Err(x) => {
@@ -224,6 +295,9 @@ pub fn open_stream(id: &FileID) -> Option<ffmpeg::AVFormat> {
             }
         }
     }
-    // eprintln!("no...");
     None
+}
+
+pub fn get_file_by_id(id: &FileID) -> Option<PhysicalFileRef> {
+    PHYSICAL_FILES.read().unwrap().get(id).cloned()
 }
