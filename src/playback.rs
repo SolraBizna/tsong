@@ -484,7 +484,10 @@ fn playback_thread(state: Arc<Mutex<InternalState>>,
                             break 'alive_loop;
                         },
                         PlaybackFinished => {
-                            state.lock().unwrap().status = PlaybackStatus::Stopped;
+                            let mut state = state.lock().unwrap();
+                            if state.status == PlaybackStatus::Playing {
+                                state.status = PlaybackStatus::Stopped;
+                            }
                             break 'alive_loop;
                         },
                     }
