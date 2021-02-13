@@ -126,6 +126,7 @@ pub fn open_database() -> anyhow::Result<()> {
     drop(rows);
     drop(get_playlists);
     *database_lock = Some(RefCell::new(database));
+    drop(database_lock);
     playlist::rebuild_children();
     Ok(())
 }
