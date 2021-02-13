@@ -4,6 +4,7 @@
 use anyhow::anyhow;
 use std::{
     collections::VecDeque,
+    ffi::OsStr,
     fs,
     path::{Path, PathBuf},
     rc::Rc,
@@ -165,6 +166,12 @@ fn search_thread_body(rescan_request_rx: mpsc::Receiver<Vec<String>>,
                         continue
                     },
                 };
+                match ent.path().file_name().map(OsStr::to_string_lossy) {
+                    Some(x) => if x.starts_with(".") || x.ends_with("\r") {
+                        continue
+                    },
+                    None => continue,
+                }
                 let metadata = match ent.path().metadata() {
                     Err(x) => {
                         let x = anyhow!(x)
