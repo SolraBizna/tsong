@@ -136,6 +136,8 @@ lazy_static! {
 fn map_raw_meta(k: &str) -> Option<&str> {
     match k {
         "title" | "artist" | "album" => Some(k),
+        "loop_start" | "LOOP_START" => Some("loop_start"),
+        "loop_end" | "LOOP_END" => Some("loop_end"),
         "disc" => Some("disc#"),
         "track" => Some("track#"),
         _ => None,

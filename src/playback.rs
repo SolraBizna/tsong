@@ -310,7 +310,7 @@ fn playback_thread(state: Arc<Mutex<InternalState>>,
                             // Otherwise, play the FIRST SONG.
                             let mut state = state.lock().unwrap();
                             if state.future_song.is_none() {
-                                state.next_song(true);
+                                state.next_song();
                                 state.active_song = state.future_song
                                     .as_ref().map(|x| (x.clone(), 0.0));
                             }
@@ -323,7 +323,7 @@ fn playback_thread(state: Arc<Mutex<InternalState>>,
                             // Queue the next song to be played, but don't
                             // start playing it yet.
                             let mut state = state.lock().unwrap();
-                            state.next_song(true);
+                            state.next_song();
                             state.active_song = state.future_song
                                 .as_ref().map(|x| (x.clone(), 0.0));
                             state.future_stream = None;
@@ -432,7 +432,7 @@ fn playback_thread(state: Arc<Mutex<InternalState>>,
                                     // play the next song, AS THE USER HEARS
                                     state.future_stream = None;
                                     state.future_song = state.active_song.as_mut().map(|(x,_)| x.clone());
-                                    state.next_song(true);
+                                    state.next_song();
                                     break 'alive_loop;
                                 },
                                 Prev => {
@@ -577,7 +577,7 @@ impl InternalState {
     }
     /// Goes to the next song in the playlist, which might involve looping
     /// and/or reshuffling the playlist.
-    fn next_song(&mut self, even_if_looping_one: bool) {
+    fn next_song(&mut self) {
         let playlist = self.future_playlist.as_ref().unwrap()
             .maybe_refreshed();
         let playmode = playlist.get_playmode();
@@ -589,9 +589,6 @@ impl InternalState {
         };
         let next_index = match cur_index {
             None => Some(0),
-            Some(x) if playmode == Playmode::LoopOne && !even_if_looping_one=>{
-                Some(x)
-            },
             Some(x) if x == songs.len() - 1 => {
                 if playmode == Playmode::End {
                     None
@@ -657,7 +654,7 @@ impl InternalState {
                     eprintln!("Error while trying to open {:?}\n{:?}",
                               self.future_song.as_ref().unwrap(), x);
                     self.future_stream = None;
-                    self.next_song(true);
+                    self.next_song();
                     return 0;
                 }
             }
@@ -667,18 +664,66 @@ impl InternalState {
             if let Some(ref mut av) = self.future_stream {
                 let mut decoded_so_far = 0;
                 while decoded_so_far < sample_count && !self.future_song.is_none() {
-                     let more_left = av.decode_some(|time, sample_rate, channel_count, data| {
+                    let looping = self.future_playlist.as_ref().unwrap().read()
+                        .unwrap().get_playmode() == Playmode::LoopOne;
+                    let loop_spot: Option<f64> =
+                        if looping {
+                            self.future_song.as_ref()
+                                .and_then(|x| x.read().unwrap().get_metadata()
+                                          .get("loop_end").map(String::as_str)
+                                          .and_then(|x| str::parse(x).ok()))
+                        } else { None };
+                    // true if we have encountered the loop spot
+                    let mut endut = false;
+                    let more_left = av.decode_some(|start_time, sample_rate, channel_count, mut data| {
+                        if endut { return }
                         assert!(data.len() > 0);
                         assert!(channel_count > 0 && channel_count < 32);
+                        if let Some(loop_spot) = loop_spot {
+                            if loop_spot >= start_time {
+                                let samples_in_frame =
+                                    data.len() / channel_count as usize;
+                                let duration = (samples_in_frame as f64)
+                                    / sample_rate;
+                                if loop_spot < start_time + duration {
+                                    endut = true;
+                                    let end_sample = (loop_spot - start_time)
+                                        * sample_rate;
+                                    let floored_end_sample =end_sample.floor();
+                                    let end_sample =
+                                        if end_sample == floored_end_sample {
+                                            floored_end_sample - 1.0
+                                        } else { floored_end_sample } as usize;
+                                    let end_index = end_sample
+                                        * channel_count as usize;
+                                    assert!(end_index <= data.len());
+                                    data.resize(end_index, 0.0);
+                                }
+                            }
+                        }
                         decoded_so_far += data.len() / channel_count as usize;
                         FRAME_QUEUE.lock().unwrap().push_back(AudioFrame {
                             song_id, consumed: 0,
-                            time, sample_rate, channel_count, data,
+                            time: start_time, sample_rate, channel_count, data,
                         });
                     });
-                    if !more_left {
-                        self.next_song(false);
-                        break
+                    if endut {
+                        let loop_spot: f64 =
+                            self.future_song.as_ref()
+                            .and_then(|x| x.read().unwrap().get_metadata()
+                                      .get("loop_start").map(String::as_str)
+                                      .and_then(|x| str::parse(x).ok()))
+                            .unwrap_or(0.0);
+                        av.seek_to_time(loop_spot);
+                    }
+                    else if !more_left {
+                        if looping {
+                            av.seek_to_time(0.0);
+                        }
+                        else {
+                            self.next_song();
+                            break
+                        }
                     }
                 }
                 return decoded_so_far
