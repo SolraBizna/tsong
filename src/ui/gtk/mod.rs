@@ -575,16 +575,15 @@ impl Controller {
             set_image(&self.play_button, &self.play_icon, fallback::PLAY);
         }
         else {
-            if status == PlaybackStatus::Stopped {
+            let song_to_play = if status == PlaybackStatus::Stopped {
                 playback::set_future_playlist(self.active_playlist.clone());
-            }
-            let playlist_model = self.playlist_model.as_ref().unwrap();
-            let song_to_play = 
+                let playlist_model = self.playlist_model.as_ref().unwrap();
                 self.playlist_view.get_cursor().0
-                .and_then(|x| playlist_model.get_iter(&x))
-                .map(|x| playlist_model.get_value(&x, 0))
-                .and_then(value_to_song_id)
-                .and_then(logical::get_song_by_song_id);
+                    .and_then(|x| playlist_model.get_iter(&x))
+                    .map(|x| playlist_model.get_value(&x, 0))
+                    .and_then(value_to_song_id)
+                    .and_then(logical::get_song_by_song_id)
+            } else { None };
             playback::send_command(PlaybackCommand::Play(song_to_play));
             set_image(&self.play_button, &self.pause_icon, fallback::PAUSE);
         }
