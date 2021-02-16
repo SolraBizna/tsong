@@ -358,6 +358,7 @@ fn playback_thread(state: Arc<Mutex<InternalState>>,
             // - We're starting playback from nothing. Make a new stream.
             // - Sample rate changed during playback. Make a new stream.
             // - User requested that a different song be played.
+            // - User changed the audio device. (TODO)
             // - We hit the end of the playlist and looping isn't enabled.
             //   Finish up. (This might be handled elsewhere?)
             let (sample_rate, channel_count) = {
@@ -376,9 +377,20 @@ fn playback_thread(state: Arc<Mutex<InternalState>>,
             *CURRENT_AUDIO_FORMAT.lock().unwrap()
                 = (sample_rate, channel_count);
             // Time to open a new stream...
-            let parameters = Parameters::new(pa.default_output_device()
-                                             .expect("No default output \
-                                                      device?"),
+            let hostapi_index = prefs::get_chosen_audio_api(&pa);
+            let device_index = prefs::get_chosen_audio_device_for_api
+                (&pa, hostapi_index);
+            let device_index = match device_index {
+                Some(x) => pa.api_device_index_to_device_index
+                    (hostapi_index, x as i32).unwrap(),
+                None => match pa.host_api_info(hostapi_index)
+                    .and_then(|x| x.default_output_device) {
+                        Some(x) => x,
+                        None => pa.default_output_device()
+                            .expect("No default output device?")
+                    }
+            };
+            let parameters = Parameters::new(device_index,
                                              channel_count,
                                              true, // interleaved
                                              DESIRED_LATENCY);

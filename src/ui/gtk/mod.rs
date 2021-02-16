@@ -47,6 +47,8 @@ use std::{
     rc::{Rc,Weak},
 };
 
+mod settings;
+
 // TODO: this should be fluent...
 const PLAYLIST_CODE_TOOLTIP: &str =
     "Enter playlist code here, e.g.:\n\
@@ -72,7 +74,7 @@ mod fallback {
     //pub const PLAY: &str = "\u{25B8}\u{FE0E}";
 }
 
-struct Controller {
+pub struct Controller {
     active_playlist: Option<PlaylistRef>,
     control_box: gtk::Box,
     delete_playlist_button: ToolButton,
@@ -110,6 +112,7 @@ struct Controller {
     loop_one_icon: Option<Image>,
     scan_thread: ScanThread,
     rolled_down_height: i32,
+    settings_controller: Option<Rc<RefCell<settings::Controller>>>,
     me: Option<Weak<RefCell<Controller>>>,
 }
 
@@ -161,7 +164,7 @@ impl Controller {
             rollup_icon: None, rolldown_icon: None,
             loop_icon: None, loop_one_icon: None, shuffle_icon: None,
             active_playlist: None, playlist_generation: Default::default(),
-            last_built_playlist: None, me: None,
+            last_built_playlist: None, me: None, settings_controller: None,
             rolled_down_height: 400,
         }));
         // Throughout this function, we make use of a hack.
@@ -171,10 +174,10 @@ impl Controller {
         // controller, so we ignore the signal.
         let mut this = nu.borrow_mut();
         this.me = Some(Rc::downgrade(&nu));
+        this.settings_controller = Some(settings::Controller::new());
         this.delete_playlist_button
             .set_sensitive(this.delete_playlist_button_should_be_sensitive());
         this.reload_icons();
-        this.settings_button.set_sensitive(false);
         this.playlists_view.append_column(&this.playlist_name_column);
         this.volume_button.connect_value_changed(|_, value| {
             prefs::set_volume((value * 100.0).floor() as i32);
@@ -240,6 +243,11 @@ impl Controller {
         this.window.connect_size_allocate(move |_, allocation| {
             let _ = controller.try_borrow_mut()
                 .map(|mut x| x.main_window_resized(allocation));
+        });
+        let controller = nu.clone();
+        this.settings_button.connect_clicked(move |_| {
+            let _ = controller.try_borrow_mut()
+                .map(|mut x| x.clicked_settings());
         });
         this.activate_playlist_by_path(&TreePath::new_first());
         this.periodic();
@@ -763,6 +771,11 @@ impl Controller {
                 self.rollup_button.set_sensitive(false);
             }
         }
+    }
+    fn clicked_settings(&mut self) -> Option<()> {
+        self.settings_controller.as_ref().unwrap().try_borrow_mut().ok()?
+            .show();
+        None
     }
 }
 
