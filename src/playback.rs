@@ -407,6 +407,7 @@ fn playback_thread(state: Arc<Mutex<InternalState>>,
             decode_some_frames(&state);
             stream.start()
                 .expect("Unable to start audio stream");
+            let mut sample_rate_changing = false;
             'alive_loop: while state.lock().unwrap().status == PlaybackStatus::Playing {
                 let mut got_message = false;
                 // process at least one message. once at least one message has
@@ -493,6 +494,7 @@ fn playback_thread(state: Arc<Mutex<InternalState>>,
                             }
                         },
                         SampleFormatChanged => {
+                            sample_rate_changing = true;
                             break 'alive_loop;
                         },
                         PlaybackFinished => {
@@ -517,7 +519,7 @@ fn playback_thread(state: Arc<Mutex<InternalState>>,
             REPORT_QUEUE.lock().unwrap().clear();
             // Any frames that the user was *going* to hear after they hit the
             // end of playback are of no consequence.
-            FRAME_QUEUE.lock().unwrap().clear();
+            if !sample_rate_changing { FRAME_QUEUE.lock().unwrap().clear() }
             let mut state = state.lock().unwrap();
             match state.status {
                 PlaybackStatus::Playing => (),
