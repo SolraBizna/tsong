@@ -368,8 +368,13 @@ impl Controller {
         self.hostapi_model.clear();
     }
     pub fn show(&mut self) {
-        self.populate_hostapi();
-        self.populate_locations();
-        self.window.show_all();
+        if !self.window.is_visible() {
+            self.populate_hostapi();
+            self.populate_locations();
+            self.window.show_all();
+        }
+        else {
+            self.window.present();
+        }
     }
 }
