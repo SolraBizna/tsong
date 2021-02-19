@@ -42,7 +42,7 @@
 #scan_spinner {
     margin-right: 1em;
 }
-#settings {
+box#settings {
     margin: 4px 8px 4px 8px;
     min-width: 500px;
 }

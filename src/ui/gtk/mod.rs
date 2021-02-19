@@ -314,7 +314,11 @@ impl Controller {
         for _ in playlist.get_columns() {
             types.push(Type::String); // Each metadata column...
         }
+        // A bug in GTK+ prevents the built-in sort indicator from being useful
+        // so let's just unplug all this code for now.
+        /*
         let first_sort_by = playlist.get_sort_order().get(0);
+         */
         let playlist_model = ListStore::new(&types[..]);
         let mut column_index: u32 = 2;
         for column in playlist.get_columns() {
@@ -343,6 +347,7 @@ impl Controller {
                                                                 as u32);
                 });
             }
+            /*
             match first_sort_by {
                 Some((tag,descending)) if tag == &column.tag => {
                     tvc.set_sort_indicator(true);
@@ -353,6 +358,7 @@ impl Controller {
                     tvc.set_sort_indicator(false);
                 },
             };
+             */
             tvc.pack_start(&cell, true);
             if column.tag == "duration" || column.tag == "year"
             || column.tag.ends_with("_number") {
@@ -365,8 +371,7 @@ impl Controller {
             self.playlist_view.append_column(&tvc);
         }
         let tvc = TreeViewColumn::new();
-        tvc.set_title(fallback::SETTINGS);
-        tvc.set_clickable(true);
+        tvc.set_title(""); // blank column to enforce sizes...
         self.playlist_view.append_column(&tvc);
         let mut song_index = 1;
         let mut total_duration = 0u32;
@@ -943,7 +948,7 @@ pub fn go() {
         // Button to change loop mode:
         let playmode_button = ToggleButtonBuilder::new()
             .name("playmode").build();
-        playlist_meta_box.pack_end(&playmode_button, false, false, 0);
+        playlist_meta_box.pack_start(&playmode_button, false, false, 0);
         // The playlist code:
         let playlist_code = EntryBuilder::new().hexpand(true)
             .placeholder_text("Manually added songs only")
