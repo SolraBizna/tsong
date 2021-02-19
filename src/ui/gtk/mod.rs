@@ -20,7 +20,6 @@ use gtk::{
     PolicyType,
     ScrolledWindowBuilder,
     SeparatorBuilder,
-    SortType,
     Spinner, SpinnerBuilder,
     StyleContext,
     ToggleButton, ToggleButtonBuilder,
@@ -29,6 +28,7 @@ use gtk::{
     TreeView, TreeViewBuilder, TreeViewColumn,
     VolumeButton, VolumeButtonBuilder,
     Widget,
+    Window, WindowBuilder, WindowType,
 };
 use gdk::{
     Geometry,
@@ -92,6 +92,7 @@ pub struct Controller {
     playlists_model: TreeStore,
     playlists_view: TreeView,
     playmode_button: ToggleButton,
+    playlist_edit_button: Button,
     prev_button: Button,
     rollup_button: Button,
     rollup_grid: Grid,
@@ -110,11 +111,13 @@ pub struct Controller {
     shuffle_icon: Option<Image>,
     loop_icon: Option<Image>,
     loop_one_icon: Option<Image>,
+    settings_icon: Option<Image>,
     scan_thread: ScanThread,
     rolled_down_height: i32,
     settings_controller: Option<Rc<RefCell<settings::Controller>>>,
     periodic_timer: Option<SourceId>,
     volume_changed: bool,
+    playlist_editor_window: Window,
     me: Option<Weak<RefCell<Controller>>>,
 }
 
@@ -127,17 +130,156 @@ fn set_image(button: &Button, icon: &Option<Image>, fallback: &str) {
 }
 
 impl Controller {
-    pub fn new(rollup_button: Button, settings_button: Button,
-               prev_button: Button, next_button: Button,
-               shuffle_button: ToggleButton, playmode_button: ToggleButton,
-               play_button: Button, volume_button: VolumeButton,
-               rollup_grid: Grid, new_playlist_button: ToolButton,
-               delete_playlist_button: ToolButton,
-               playlists_view: TreeView, playlist_view: TreeView,
-               playlist_code: Entry, playlist_stats: Label, osd: Label,
-               scan_spinner: Spinner, control_box: gtk::Box,
-               window: ApplicationWindow)
-        -> Rc<RefCell<Controller>> {
+    pub fn new(application: &Application) -> Rc<RefCell<Controller>> {
+        if let Some(path) = std::env::vars().find_map(|(x,y)| {
+            if x == "TSONG_ICON_PATH" { Some(y) } else { None }
+        }) {
+            let icon_theme = IconTheme::get_default().unwrap();
+            icon_theme.append_search_path(&path);
+        }
+        let window = ApplicationWindow::new(application);
+        window.set_title("Tsong");
+        window.set_default_size(640, 460);
+        let provider = gtk::CssProvider::new();
+        provider.load_from_data(include_bytes!("css.css")).unwrap();
+        StyleContext::add_provider_for_screen(&Screen::get_default().unwrap(),
+                                              &provider, 750);
+        let outer_box = BoxBuilder::new().orientation(Orientation::Vertical)
+            .build();
+        window.add(&outer_box);
+        // The outer box is divided into two things.
+        // One, a fixed-height row that contains the playback controls:
+        let control_box = BoxBuilder::new()
+            .name("controls")
+            .spacing(4).hexpand(true).build();
+        outer_box.add(&control_box);
+        // Two, taking up the rest of the window, a variable-height box that
+        // contains the playlist controls:
+        let rollup_grid = GridBuilder::new()
+            .expand(true).build();
+        // So, the playback controls...
+        // Button to bring up the settings window:
+        let settings_button = ButtonBuilder::new()
+            .name("settings").build();
+        control_button_add(&control_box, &settings_button, &["popup"]);
+        // Button to go back to the previous song in the playlist:
+        let prev_button = ButtonBuilder::new()
+            .name("prev").build();
+        control_button_add(&control_box, &prev_button, &["circular"]);
+        // Explicit play/pause button
+        let play_button = ButtonBuilder::new()
+            .name("playpause").build();
+        control_button_add(&control_box, &play_button, &["circular"]);
+        // Osd widget!
+        let osd = LabelBuilder::new()
+            .name("osd")
+            .hexpand(true).build();
+        control_box.add(&osd);
+        // Button to go to the next song in the playlist:
+        let next_button = ButtonBuilder::new()
+            .name("next").build();
+        control_button_add(&control_box, &next_button, &["circular"]);
+        // Volume slider:
+        let volume_button = VolumeButtonBuilder::new()
+            .name("volume")
+            .margin_top(7).margin_bottom(7)
+            .value(prefs::get_volume() as f64 / 100.0)
+            .build();
+        control_box.add(&volume_button);
+        // Button to "roll up" the playlist box:
+        let rollup_button = ButtonBuilder::new()
+            .name("rollup").build();
+        control_button_add(&control_box, &rollup_button, &["toggle"]);
+        // That's the end of the playback controls.
+        // Now, the playlists!
+        let separator = SeparatorBuilder::new()
+            .orientation(Orientation::Vertical).build();
+        rollup_grid.attach(&separator, 1, 0, 1, 2);
+        let playlists_box = BoxBuilder::new()
+            .orientation(Orientation::Vertical).build();
+        let playlists_window = ScrolledWindowBuilder::new()
+            .name("playlists")
+            .hscrollbar_policy(PolicyType::Never)
+            .vscrollbar_policy(PolicyType::Automatic)
+            .vexpand(true)
+            .build();
+        let playlists_view = TreeViewBuilder::new()
+            .headers_visible(false).reorderable(true).build();
+        playlists_window.add(&playlists_view);
+        playlists_box.add(&playlists_window);
+        rollup_grid.attach(&playlists_box, 0, 0, 1, 1);
+        let playlist_button_box = ButtonBoxBuilder::new()
+            .layout_style(ButtonBoxStyle::Expand)
+            .build();
+        let delete_playlist_button
+            = ToolButtonBuilder::new().icon_name("list-remove").build();
+        playlist_button_box.add(&delete_playlist_button);
+        let new_playlist_button
+            = ToolButtonBuilder::new().icon_name("list-add").build();
+        playlist_button_box.add(&new_playlist_button);
+        rollup_grid.attach(&playlist_button_box, 0, 1, 1, 1);
+        // and the play...list
+        let playlist_itself_box = BoxBuilder::new()
+            .name("playlist").orientation(Orientation::Vertical).build();
+        let playlist_meta_box = ButtonBoxBuilder::new()
+            .name("meta").layout_style(ButtonBoxStyle::Expand)
+            .homogeneous(false)
+            .orientation(Orientation::Horizontal).build();
+        // make the right edge merge with the window edge :)
+        playlist_meta_box.pack_end(&BoxBuilder::new().build(), false, false, 0);
+        // Button to change shuffle mode:
+        let shuffle_button = ToggleButtonBuilder::new()
+            .name("shuffle").build();
+        playlist_meta_box.pack_start(&shuffle_button, false, false, 0);
+        // Button to change loop mode:
+        let playmode_button = ToggleButtonBuilder::new()
+            .name("playmode").build();
+        playlist_meta_box.pack_start(&playmode_button, false, false, 0);
+        // Button to edit playlist settings:
+        let playlist_edit_button = ButtonBuilder::new()
+            .name("edit_playlist").label("Edit").build();
+        playlist_meta_box.pack_end(&playlist_edit_button, false, false, 0);
+        // The playlist code:
+        let playlist_code = EntryBuilder::new().hexpand(true)
+            .placeholder_text("Manually added songs only")
+            .tooltip_text(PLAYLIST_CODE_TOOLTIP)
+            .build();
+        playlist_meta_box.pack_start(&playlist_code, true, true, 0);
+        // TODO: make this a monospace font?
+        playlist_itself_box.add(&playlist_meta_box);
+        // The playlist itself:
+        let playlist_window = ScrolledWindowBuilder::new()
+            .hscrollbar_policy(PolicyType::Automatic)
+            .vscrollbar_policy(PolicyType::Automatic)
+            .vexpand(true).hexpand(true)
+            .build();
+        let playlist_view = TreeViewBuilder::new().expand(true)
+            .headers_visible(true).build();
+        playlist_window.add(&playlist_view);
+        playlist_itself_box.add(&playlist_window);
+        rollup_grid.attach(&playlist_itself_box, 2, 0, 1, 1);
+        let bottom_overlay = Overlay::new();
+        let playlist_stats = LabelBuilder::new()
+            .name("playlist_stats").build();
+        bottom_overlay.add(&playlist_stats);
+        let scan_spinner = SpinnerBuilder::new().name("scan_spinner")
+            .halign(Align::End).valign(Align::Center).build();
+        bottom_overlay.add_overlay(&scan_spinner);
+        rollup_grid.attach(&bottom_overlay, 2, 1, 1, 1);
+        outer_box.add(&rollup_grid);
+        // now, last but not least, the "playlist editor" window
+        let playlist_editor_window = WindowBuilder::new()
+            .name("playlist_editor").type_(WindowType::Toplevel)
+            .title("Tsong - Playlist Editor").build();
+        playlist_editor_window.connect_delete_event(move |window, _| {
+            window.hide_on_delete()
+        });
+        let playlist_editor_box = BoxBuilder::new()
+            .name("playlist_editor").orientation(Orientation::Vertical)
+            .build();
+        playlist_editor_window.add(&playlist_editor_box);
+        // done setting up the widgets, time to bind everything to the
+        // controller
         let mut scan_thread = ScanThread::new();
         scan_thread.rescan(prefs::get_music_paths())
             .expect("Couldn't start the initial music scan!");
@@ -161,9 +303,10 @@ impl Controller {
             scan_spinner, scan_thread, rollup_grid, control_box,
             new_playlist_button, delete_playlist_button,
             playlist_name_column, playlist_name_cell, window,
+            playlist_edit_button, playlist_editor_window,
             prev_icon: None, next_icon: None,
             play_icon: None, pause_icon: None,
-            rollup_icon: None, rolldown_icon: None,
+            rollup_icon: None, rolldown_icon: None, settings_icon: None,
             loop_icon: None, loop_one_icon: None, shuffle_icon: None,
             active_playlist: None, playlist_generation: Default::default(),
             last_built_playlist: None, me: None, settings_controller: None,
@@ -230,7 +373,7 @@ impl Controller {
                 .map(|mut x| x.clicked_shuffle());
         });
         let controller = nu.clone();
-        this.playmode_button.connect_clicked(move |_| {
+         this.playmode_button.connect_clicked(move |_| {
             let _ = controller.try_borrow_mut()
                 .map(|mut x| x.clicked_playmode());
         });
@@ -254,8 +397,15 @@ impl Controller {
             let _ = controller.try_borrow_mut()
                 .map(|mut x| x.clicked_settings());
         });
+        let controller = nu.clone();
+        this.playlist_edit_button.connect_clicked(move |_| {
+            let _ = controller.try_borrow_mut()
+                .map(|mut x| x.clicked_playlist_edit());
+        });
         this.activate_playlist_by_path(&TreePath::new_first());
         this.force_periodic();
+        // okay, show the window and away we go
+        this.window.show_all();
         drop(this);
         nu
     }
@@ -438,6 +588,9 @@ impl Controller {
         self.shuffle_icon = get_icon("tsong-shuffle");
         self.loop_icon = get_icon("tsong-loop");
         self.loop_one_icon = get_icon("tsong-loop-one");
+        self.settings_icon = get_icon("tsong-settings");
+        set_image(&self.settings_button, &self.settings_icon,
+                  fallback::SETTINGS);
         set_image(&self.prev_button, &self.prev_icon, fallback::PREV);
         set_image(&self.next_button, &self.next_icon, fallback::NEXT);
         if playback::get_playback_status().is_playing() {
@@ -805,6 +958,14 @@ impl Controller {
             .show();
         None
     }
+    fn clicked_playlist_edit(&mut self) {
+        if !self.playlist_editor_window.is_visible() {
+            self.playlist_editor_window.show_all();
+        }
+        else {
+            self.playlist_editor_window.present();
+        }
+    }
     fn rescan(&mut self) {
         match self.scan_thread.rescan(prefs::get_music_paths()) {
             Ok(_) => (),
@@ -851,142 +1012,8 @@ pub fn go() {
         Default::default(),
     ).expect("failed to initialize the GTK application (!?!)");
     application.connect_activate(|application| {
-        let window = ApplicationWindow::new(application);
-        window.set_title("Tsong");
-        window.set_default_size(640, 460);
-        let provider = gtk::CssProvider::new();
-        provider.load_from_data(include_bytes!("css.css")).unwrap();
-        StyleContext::add_provider_for_screen(&Screen::get_default().unwrap(),
-                                              &provider, 750);
-        let outer_box = BoxBuilder::new().orientation(Orientation::Vertical)
-            .build();
-        window.add(&outer_box);
-        // The outer box is divided into two things.
-        // One, a fixed-height row that contains the playback controls:
-        let control_box = BoxBuilder::new()
-            .name("controls")
-            .spacing(4).hexpand(true).build();
-        outer_box.add(&control_box);
-        // Two, taking up the rest of the window, a variable-height box that
-        // contains the playlist controls:
-        let rollup_grid = GridBuilder::new()
-            .expand(true).build();
-        // So, the playback controls...
-        // Button to bring up the settings window:
-        let settings_button = ButtonBuilder::new()
-            .name("settings").label(fallback::SETTINGS).build();
-        control_button_add(&control_box, &settings_button, &["popup"]);
-        // Button to go back to the previous song in the playlist:
-        let prev_button = ButtonBuilder::new()
-            .name("prev").build();
-        control_button_add(&control_box, &prev_button, &["circular"]);
-        // Explicit play/pause button
-        let play_button = ButtonBuilder::new()
-            .name("playpause").build();
-        control_button_add(&control_box, &play_button, &["circular"]);
-        // Osd widget!
-        let osd = LabelBuilder::new()
-            .name("osd")
-            .hexpand(true).build();
-        control_box.add(&osd);
-        // Button to go to the next song in the playlist:
-        let next_button = ButtonBuilder::new()
-            .name("next").build();
-        control_button_add(&control_box, &next_button, &["circular"]);
-        // Volume slider:
-        let volume_slider = VolumeButtonBuilder::new()
-            .name("volume")
-            .margin_top(7).margin_bottom(7)
-            .value(prefs::get_volume() as f64 / 100.0)
-            .build();
-        control_box.add(&volume_slider);
-        // Button to "roll up" the playlist box:
-        let rollup_button = ButtonBuilder::new()
-            .name("rollup").build();
-        control_button_add(&control_box, &rollup_button, &["toggle"]);
-        // That's the end of the playback controls.
-        // Now, the playlists!
-        let separator = SeparatorBuilder::new()
-            .orientation(Orientation::Vertical).build();
-        rollup_grid.attach(&separator, 1, 0, 1, 2);
-        let playlists_box = BoxBuilder::new()
-            .orientation(Orientation::Vertical).build();
-        let playlists_window = ScrolledWindowBuilder::new()
-            .name("playlists")
-            .hscrollbar_policy(PolicyType::Never)
-            .vscrollbar_policy(PolicyType::Automatic)
-            .vexpand(true)
-            .build();
-        let playlists_view = TreeViewBuilder::new()
-            .headers_visible(false).reorderable(true).build();
-        playlists_window.add(&playlists_view);
-        playlists_box.add(&playlists_window);
-        rollup_grid.attach(&playlists_box, 0, 0, 1, 1);
-        let playlist_button_box = ButtonBoxBuilder::new()
-            .layout_style(ButtonBoxStyle::Expand)
-            .build();
-        let delete_playlist_button
-            = ToolButtonBuilder::new().icon_name("list-remove").build();
-        playlist_button_box.add(&delete_playlist_button);
-        let new_playlist_button
-            = ToolButtonBuilder::new().icon_name("list-add").build();
-        playlist_button_box.add(&new_playlist_button);
-        rollup_grid.attach(&playlist_button_box, 0, 1, 1, 1);
-        // and the play...list
-        let playlist_itself_box = BoxBuilder::new()
-            .name("playlist").orientation(Orientation::Vertical).build();
-        let playlist_meta_box = ButtonBoxBuilder::new()
-            .name("meta").layout_style(ButtonBoxStyle::Expand)
-            .homogeneous(false)
-            .orientation(Orientation::Horizontal).build();
-        // make the right edge merge with the window edge :)
-        playlist_meta_box.pack_end(&BoxBuilder::new().build(), false, false, 0);
-        // Button to change shuffle mode:
-        let shuffle_button = ToggleButtonBuilder::new()
-            .name("shuffle").build();
-        playlist_meta_box.pack_start(&shuffle_button, false, false, 0);
-        // Button to change loop mode:
-        let playmode_button = ToggleButtonBuilder::new()
-            .name("playmode").build();
-        playlist_meta_box.pack_start(&playmode_button, false, false, 0);
-        // The playlist code:
-        let playlist_code = EntryBuilder::new().hexpand(true)
-            .placeholder_text("Manually added songs only")
-            .tooltip_text(PLAYLIST_CODE_TOOLTIP)
-            .build();
-        playlist_meta_box.pack_start(&playlist_code, true, true, 0);
-        // TODO: make this a monospace font?
-        playlist_itself_box.add(&playlist_meta_box);
-        // The playlist itself:
-        let playlist_window = ScrolledWindowBuilder::new()
-            .hscrollbar_policy(PolicyType::Automatic)
-            .vscrollbar_policy(PolicyType::Automatic)
-            .vexpand(true).hexpand(true)
-            .build();
-        let playlist_view = TreeViewBuilder::new().expand(true)
-            .headers_visible(true).build();
-        playlist_window.add(&playlist_view);
-        playlist_itself_box.add(&playlist_window);
-        rollup_grid.attach(&playlist_itself_box, 2, 0, 1, 1);
-        let bottom_overlay = Overlay::new();
-        let playlist_stats = LabelBuilder::new()
-            .name("playlist_stats").build();
-        bottom_overlay.add(&playlist_stats);
-        let scan_spinner = SpinnerBuilder::new().name("scan_spinner")
-            .halign(Align::End).valign(Align::Center).build();
-        bottom_overlay.add_overlay(&scan_spinner);
-        rollup_grid.attach(&bottom_overlay, 2, 1, 1, 1);
-        outer_box.add(&rollup_grid);
-        // okay, show the window and away we go
-        window.show_all();
         // Controller will hook itself in and keep track of its own lifetime
-        let _ = Controller::new(rollup_button, settings_button, prev_button,
-                                next_button, shuffle_button, playmode_button,
-                                play_button, volume_slider, rollup_grid,
-                                new_playlist_button, delete_playlist_button,
-                                playlists_view, playlist_view,
-                                playlist_code, playlist_stats, osd,
-                                scan_spinner, control_box, window);
+        let _ = Controller::new(application);
     });
     // don't parse a command line, apparently? the documentation is fuzzy on
     // what that would entail anyway...
