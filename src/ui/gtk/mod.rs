@@ -114,6 +114,7 @@ pub struct Controller {
     rolled_down_height: i32,
     settings_controller: Option<Rc<RefCell<settings::Controller>>>,
     periodic_timer: Option<SourceId>,
+    volume_changed: bool,
     me: Option<Weak<RefCell<Controller>>>,
 }
 
@@ -167,6 +168,7 @@ impl Controller {
             active_playlist: None, playlist_generation: Default::default(),
             last_built_playlist: None, me: None, settings_controller: None,
             rolled_down_height: 400, periodic_timer: None,
+            volume_changed: false,
         }));
         // Throughout this function, we make use of a hack.
         // Each signal that depends on the Controller starts with an attempt to
@@ -180,8 +182,10 @@ impl Controller {
             .set_sensitive(this.delete_playlist_button_should_be_sensitive());
         this.reload_icons();
         this.playlists_view.append_column(&this.playlist_name_column);
-        this.volume_button.connect_value_changed(|_, value| {
-            prefs::set_volume((value * 100.0).floor() as i32);
+        let controller = nu.clone();
+        this.volume_button.connect_value_changed(move |_, value| {
+            let _ = controller.try_borrow_mut()
+                .map(|mut x| x.update_volume(value));
         });
         let controller = nu.clone();
         this.playlist_code.connect_property_text_notify(move |_| {
@@ -482,6 +486,14 @@ impl Controller {
         self.update_view();
         self.update_scan_status();
         self.maybe_rebuild_playlist();
+        if self.volume_changed {
+            match prefs::write() {
+                Ok(_) => (),
+                Err(x) => {
+                    eprintln!("Error writing preferences: {:?}", x);
+                },
+            }
+        }
         let timeout_ms =
             if forced || playback::get_playback_status().is_playing() { 100 }
             else { 1000 };
@@ -794,6 +806,10 @@ impl Controller {
             Err(x) => eprintln!("Warning: couldn't start music scan! {:?}", x),
         }
         self.force_periodic();
+    }
+    fn update_volume(&mut self, nu: f64) {
+        prefs::set_volume((nu * 100.0).floor() as i32);
+        self.volume_changed = true;
     }
 }
 
