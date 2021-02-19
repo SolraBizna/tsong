@@ -38,7 +38,7 @@ use gdk::{
 };
 use glib::{
     types::Type,
-    source::timeout_add_local,
+    source::{SourceId, source_remove, timeout_add_local},
     Value,
 };
 use gio::prelude::*;
@@ -113,6 +113,7 @@ pub struct Controller {
     scan_thread: ScanThread,
     rolled_down_height: i32,
     settings_controller: Option<Rc<RefCell<settings::Controller>>>,
+    periodic_timer: Option<SourceId>,
     me: Option<Weak<RefCell<Controller>>>,
 }
 
@@ -165,7 +166,7 @@ impl Controller {
             loop_icon: None, loop_one_icon: None, shuffle_icon: None,
             active_playlist: None, playlist_generation: Default::default(),
             last_built_playlist: None, me: None, settings_controller: None,
-            rolled_down_height: 400,
+            rolled_down_height: 400, periodic_timer: None,
         }));
         // Throughout this function, we make use of a hack.
         // Each signal that depends on the Controller starts with an attempt to
@@ -200,8 +201,8 @@ impl Controller {
         });
         let controller = nu.clone();
         this.play_button.connect_clicked(move |_| {
-            let _ = controller.try_borrow()
-                .map(|x| x.clicked_play());
+            let _ = controller.try_borrow_mut()
+                .map(|mut x| x.clicked_play());
         });
         this.playlists_view.set_model(Some(&this.playlists_model));
         let controller = nu.clone();
@@ -216,8 +217,8 @@ impl Controller {
         });
         let controller = nu.clone();
         this.playlist_view.connect_row_activated(move |_, wo, _| {
-            let _ = controller.try_borrow()
-                .map(|x| x.playlist_row_activated(wo));
+            let _ = controller.try_borrow_mut()
+                .map(|mut x| x.playlist_row_activated(wo));
         });
         let controller = nu.clone();
         this.shuffle_button.connect_clicked(move |_| {
@@ -250,7 +251,7 @@ impl Controller {
                 .map(|mut x| x.clicked_settings());
         });
         this.activate_playlist_by_path(&TreePath::new_first());
-        this.periodic();
+        this.force_periodic();
         drop(this);
         nu
     }
@@ -477,20 +478,28 @@ impl Controller {
         let selection = self.playlists_view.get_selection();
         selection.select_path(wo);
     }
-    fn periodic(&mut self) {
+    fn periodic(&mut self, forced: bool) {
         self.update_view();
         self.update_scan_status();
         self.maybe_rebuild_playlist();
-        let timeout_ms = if playback::get_playback_status().is_playing() { 100 }
-        else { 1000 };
+        let timeout_ms =
+            if forced || playback::get_playback_status().is_playing() { 100 }
+            else { 1000 };
         let controller = match self.me.as_ref().and_then(Weak::upgrade) {
             None => return,
             Some(x) => x,
         };
-        timeout_add_local(timeout_ms, move || {
-            controller.borrow_mut().periodic();
+        self.periodic_timer = Some(timeout_add_local(timeout_ms, move || {
+            controller.borrow_mut().periodic(false);
             Continue(false)
-        });
+        }));
+    }
+    fn force_periodic(&mut self) {
+        match self.periodic_timer.take() {
+            Some(x) => source_remove(x),
+            None => (),
+        }
+        self.periodic(true);
     }
     fn update_view(&mut self) {
         let (status, active_song) = playback::get_status_and_active_song();
@@ -576,7 +585,7 @@ impl Controller {
             }
         }
     }
-    fn clicked_play(&self) {
+    fn clicked_play(&mut self) {
         let status = playback::get_playback_status();
         if status.is_playing() {
             playback::send_command(PlaybackCommand::Pause);
@@ -594,6 +603,7 @@ impl Controller {
             } else { None };
             playback::send_command(PlaybackCommand::Play(song_to_play));
             set_image(&self.play_button, &self.pause_icon, fallback::PAUSE);
+            self.force_periodic();
         }
     }
     fn edited_playlist_name(&self, wo: TreePath, nu: &str) -> Option<()> {
@@ -610,7 +620,7 @@ impl Controller {
         self.activate_playlist_by_path(&wo);
         None
     }
-    fn playlist_row_activated(&self, wo: &TreePath) -> Option<()> {
+    fn playlist_row_activated(&mut self, wo: &TreePath) -> Option<()> {
         let playlist_model = self.playlist_model.as_ref()?;
         let song = playlist_model.get_iter(wo)
             .map(|x| playlist_model.get_value(&x, 0))
@@ -619,6 +629,7 @@ impl Controller {
         if let Some(song) = song {
             playback::set_future_playlist(self.active_playlist.clone());
             playback::send_command(PlaybackCommand::Play(Some(song)));
+            self.force_periodic();
         }
         None
     }
@@ -782,6 +793,7 @@ impl Controller {
             Ok(_) => (),
             Err(x) => eprintln!("Warning: couldn't start music scan! {:?}", x),
         }
+        self.force_periodic();
     }
 }
 
