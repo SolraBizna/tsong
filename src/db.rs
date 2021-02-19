@@ -94,7 +94,7 @@ pub fn open_database() -> anyhow::Result<()> {
         let name: String = row.get_unwrap(3);
         let rule_code: Option<String> = row.get_unwrap(4);
         let manually_added_ids: Option<Vec<u8>> = row.get_unwrap(5);
-        let columns: Option<Vec<u8>> = row.get_unwrap(6);
+        let columns: Option<String> = row.get_unwrap(6);
         let sort_order: Option<String> = row.get_unwrap(7);
         let shuffled: Option<bool> = row.get_unwrap(8);
         let playmode: Option<i64> = row.get_unwrap(9);
@@ -109,7 +109,7 @@ pub fn open_database() -> anyhow::Result<()> {
             None => vec![],
         };
         let columns = match columns {
-            Some(_) => todo!(),
+            Some(x) => json::from_str(&x)?,
             None => playlist::DEFAULT_COLUMNS.clone(),
         };
         let sort_order = match sort_order {
@@ -205,6 +205,14 @@ pub fn update_playlist_sort_order_and_disable_shuffle(id: PlaylistID,
     dbtry(database.execute("UPDATE Playlists SET shuffled = 0, \
                             sort_order = ? WHERE id = ?;",
                            params![sort_order, id.as_inner() as i64]));
+}
+
+pub fn update_playlist_columns(id: PlaylistID, columns: &[playlist::Column]) {
+    let lock = DATABASE.lock();
+    let database = lock.as_ref().unwrap().as_ref().unwrap().borrow_mut();
+    let columns = json::to_string(columns).unwrap();
+    dbtry(database.execute("UPDATE Playlists SET columns = ? WHERE id = ?;",
+                           params![columns, id.as_inner() as i64]));
 }
 
 pub fn delete_playlist(id: PlaylistID) {

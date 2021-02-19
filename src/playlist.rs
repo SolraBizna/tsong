@@ -9,6 +9,7 @@ use std::{
     sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
+use serde::{Serialize,Deserialize};
 use mlua::Lua;
 use lazy_static::lazy_static;
 use rand::prelude::*;
@@ -72,7 +73,7 @@ impl PlaylistID {
     }
 }
 
-#[derive(Debug,Clone)]
+#[derive(Debug,Clone,Serialize,Deserialize)]
 pub struct Column {
     pub tag: String,
     pub width: u32,
@@ -176,7 +177,8 @@ impl Playlist {
         for column in self.columns.iter_mut() {
             if column.tag == tag {
                 column.width = width;
-                // TODO: database update
+                db::update_playlist_columns(self.id, &self.columns);
+                break
             }
         }
     }
