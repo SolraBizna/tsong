@@ -21,6 +21,7 @@ use gtk::{
     ScrolledWindowBuilder,
     SeparatorBuilder,
     Spinner, SpinnerBuilder,
+    StateFlags,
     StyleContext,
     ToggleButton, ToggleButtonBuilder,
     ToolButton, ToolButtonBuilder,
@@ -33,6 +34,7 @@ use gtk::{
 use gdk::{
     Geometry,
     Gravity,
+    RGBA,
     Screen,
     WindowHints,
 };
@@ -84,6 +86,7 @@ pub struct Controller {
     osd: Label,
     play_button: Button,
     playlist_code: Entry,
+    playlist_name: Entry,
     playlist_model: Option<ListStore>,
     playlist_name_cell: CellRendererText,
     playlist_name_column: TreeViewColumn,
@@ -235,16 +238,14 @@ impl Controller {
         let playmode_button = ToggleButtonBuilder::new()
             .name("playmode").build();
         playlist_meta_box.pack_start(&playmode_button, false, false, 0);
+        // The playlist name:
+        let playlist_name = EntryBuilder::new().hexpand(true)
+            .build();
+        playlist_meta_box.pack_start(&playlist_name, true, true, 0);
         // Button to edit playlist settings:
         let playlist_edit_button = ButtonBuilder::new()
             .name("edit_playlist").label("Edit").build();
         playlist_meta_box.pack_end(&playlist_edit_button, false, false, 0);
-        // The playlist code:
-        let playlist_code = EntryBuilder::new().hexpand(true)
-            .placeholder_text("Manually added songs only")
-            .tooltip_text(PLAYLIST_CODE_TOOLTIP)
-            .build();
-        playlist_meta_box.pack_start(&playlist_code, true, true, 0);
         // TODO: make this a monospace font?
         playlist_itself_box.add(&playlist_meta_box);
         // The playlist itself:
@@ -278,6 +279,12 @@ impl Controller {
             .name("playlist_editor").orientation(Orientation::Vertical)
             .build();
         playlist_editor_window.add(&playlist_editor_box);
+        // The playlist code:
+        let playlist_code = EntryBuilder::new().hexpand(true)
+            .placeholder_text("Manually added songs only")
+            .tooltip_text(PLAYLIST_CODE_TOOLTIP)
+            .build();
+        playlist_editor_box.add(&playlist_code);
         // done setting up the widgets, time to bind everything to the
         // controller
         let mut scan_thread = ScanThread::new();
@@ -304,6 +311,7 @@ impl Controller {
             new_playlist_button, delete_playlist_button,
             playlist_name_column, playlist_name_cell, window,
             playlist_edit_button, playlist_editor_window,
+            playlist_name,
             prev_icon: None, next_icon: None,
             play_icon: None, pause_icon: None,
             rollup_icon: None, rolldown_icon: None, settings_icon: None,
@@ -335,6 +343,11 @@ impl Controller {
             let _ = controller.try_borrow()
                 .map(|x| x.update_playlist_code());
         });
+        let controller = nu.clone();
+        this.playlist_name.connect_editing_done(move |_| {
+            let _ = controller.try_borrow()
+                .map(|x| x.edited_playlist_name_in_entry());
+        });
         this.prev_button.connect_clicked(|_| {
             playback::send_command(PlaybackCommand::Prev)
         });
@@ -355,7 +368,7 @@ impl Controller {
         let controller = nu.clone();
         this.playlist_name_cell.connect_edited(move |_, wo, nu| {
             let _ = controller.try_borrow()
-                .map(|x| x.edited_playlist_name(wo, nu));
+                .map(|x| x.edited_playlist_name_in_view(wo, nu));
         });
         let controller = nu.clone();
         this.playlists_view.connect_cursor_changed(move |_| {
@@ -577,18 +590,18 @@ impl Controller {
     }
     fn reload_icons(&mut self) {
         // TODO: reload icons when theme is changed
-        // note: figure this out later, for now, be sad that the stock icons
-        // are inadequate
-        self.prev_icon = get_icon("tsong-previous");
-        self.next_icon = get_icon("tsong-next");
-        self.play_icon = get_icon("tsong-play");
-        self.pause_icon = get_icon("tsong-pause");
-        self.rollup_icon = get_icon("tsong-rollup");
-        self.rolldown_icon = get_icon("tsong-rolldown");
-        self.shuffle_icon = get_icon("tsong-shuffle");
-        self.loop_icon = get_icon("tsong-loop");
-        self.loop_one_icon = get_icon("tsong-loop-one");
-        self.settings_icon = get_icon("tsong-settings");
+        let color = self.settings_button.get_style_context()
+            .get_color(StateFlags::NORMAL);
+        self.prev_icon = get_icon(&color, "tsong-previous");
+        self.next_icon = get_icon(&color, "tsong-next");
+        self.play_icon = get_icon(&color, "tsong-play");
+        self.pause_icon = get_icon(&color, "tsong-pause");
+        self.rollup_icon = get_icon(&color, "tsong-rollup");
+        self.rolldown_icon = get_icon(&color, "tsong-rolldown");
+        self.shuffle_icon = get_icon(&color, "tsong-shuffle");
+        self.loop_icon = get_icon(&color, "tsong-loop");
+        self.loop_one_icon = get_icon(&color, "tsong-loop-one");
+        self.settings_icon = get_icon(&color, "tsong-settings");
         set_image(&self.settings_button, &self.settings_icon,
                   fallback::SETTINGS);
         set_image(&self.prev_button, &self.prev_icon, fallback::PREV);
@@ -620,7 +633,7 @@ impl Controller {
             Some(id) => id,
             None => return,
         };
-        let playlist = match playlist::get_playlist_by_id(id) {
+        let playlist_ref = match playlist::get_playlist_by_id(id) {
             Some(playlist) => playlist,
             None => {
                 eprintln!("Warning: Tried to activate playlist ID {} by path \
@@ -628,12 +641,15 @@ impl Controller {
                 return
             },
         };
-        if Some(&playlist) == self.active_playlist.as_ref() {
+        if Some(&playlist_ref) == self.active_playlist.as_ref() {
             return
         }
-        self.active_playlist = Some(playlist.clone());
+        self.active_playlist = Some(playlist_ref.clone());
         self.playlist_generation.destroy();
-        self.playlist_code.set_text(playlist.read().unwrap().get_rule_code());
+        let playlist = playlist_ref.read().unwrap();
+        self.playlist_name.set_text(playlist.get_name());
+        self.playlist_code.set_text(playlist.get_rule_code());
+        drop(playlist);
         let style_context = self.playlist_code.get_style_context();
         style_context.remove_class("error");
         self.rebuild_playlist_view();
@@ -776,12 +792,25 @@ impl Controller {
             self.force_periodic();
         }
     }
-    fn edited_playlist_name(&self, wo: TreePath, nu: &str) -> Option<()> {
+    fn edited_playlist_name_in_view(&self, wo: TreePath,
+                                    nu: &str) -> Option<()> {
         let iter = self.playlists_model.get_iter(&wo)?;
         let value = self.playlists_model.get_value(&iter, 0);
         let playlist = value_to_playlist_id(value)
             .and_then(playlist::get_playlist_by_id)?;
         self.playlists_model.set_value(&iter, 1, &Value::from(nu));
+        self.playlist_name.set_text(&nu);
+        playlist.write().unwrap().set_name(nu.to_owned());
+        None
+    }
+    fn edited_playlist_name_in_entry(&self) -> Option<()> {
+        let wo = self.playlists_view.get_cursor().0?;
+        let iter = self.playlists_model.get_iter(&wo)?;
+        let value = self.playlists_model.get_value(&iter, 0);
+        let playlist = value_to_playlist_id(value)
+            .and_then(playlist::get_playlist_by_id)?;
+        let nu = self.playlist_name.get_text().to_string();
+        self.playlists_model.set_value(&iter, 1, &nu.to_value());
         playlist.write().unwrap().set_name(nu.to_owned());
         None
     }
@@ -997,13 +1026,12 @@ where T: IsA<Container>, W: IsA<Widget> {
 }
 
 // O_O
-fn get_icon(wat: &str) -> Option<Image> {
+fn get_icon(color: &RGBA, wat: &str) -> Option<Image> {
     let icon_theme = IconTheme::get_default()?;
-    let icon = icon_theme.load_icon(wat, 24, IconLookupFlags::empty()).ok()?;
-    match icon {
-        None => None,
-        Some(icon) => Some(Image::from_pixbuf(Some(&icon))),
-    }
+    let icon = icon_theme.lookup_icon(wat, 24,
+                                      IconLookupFlags::FORCE_SYMBOLIC)?;
+    let image = icon.load_symbolic(color, None, None, None).ok()?.0;
+    Some(Image::from_pixbuf(Some(&image)))
 }
 
 pub fn go() {
