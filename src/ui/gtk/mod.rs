@@ -174,7 +174,7 @@ impl Controller {
         // controller, so we ignore the signal.
         let mut this = nu.borrow_mut();
         this.me = Some(Rc::downgrade(&nu));
-        this.settings_controller = Some(settings::Controller::new());
+        this.settings_controller = Some(settings::Controller::new(Rc::downgrade(&nu)));
         this.delete_playlist_button
             .set_sensitive(this.delete_playlist_button_should_be_sensitive());
         this.reload_icons();
@@ -776,6 +776,12 @@ impl Controller {
         self.settings_controller.as_ref().unwrap().try_borrow_mut().ok()?
             .show();
         None
+    }
+    fn rescan(&mut self) {
+        match self.scan_thread.rescan(prefs::get_music_paths()) {
+            Ok(_) => (),
+            Err(x) => eprintln!("Warning: couldn't start music scan! {:?}", x),
+        }
     }
 }
 

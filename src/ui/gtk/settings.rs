@@ -3,14 +3,20 @@ use gtk::{
     prelude::*,
     Align,
     BoxBuilder,
-    ButtonBoxBuilder,
+    ButtonBoxBuilder, ButtonBoxStyle,
     Button, ButtonBuilder,
     CellRendererText,
     ComboBox, ComboBoxBuilder,
+    FileChooserDialog, FileChooserAction,
     LabelBuilder,
     ListStore,
     Orientation,
+    PolicyType,
+    ResponseType,
+    ScrolledWindowBuilder,
     SeparatorBuilder,
+    ToolButton, ToolButtonBuilder,
+    TreeView, TreeViewBuilder, TreeViewColumn,
     Window, WindowBuilder, WindowType,
 };
 use glib::{
@@ -30,17 +36,23 @@ pub struct Controller {
     window: Window,
     pa: PortAudio,
     me: Option<Weak<RefCell<Controller>>>,
+    parent: Weak<RefCell<super::Controller>>,
     apply_button: Button,
     cancel_button: Button,
     ok_button: Button,
+    delete_location_button: ToolButton,
+    new_location_button: ToolButton,
     hostapi_view: ComboBox,
     hostapi_model: ListStore,
     audiodev_view: ComboBox,
     audiodev_model: ListStore,
+    locations_view: TreeView,
+    locations_model: ListStore,
 }
 
 impl Controller {
-    pub fn new() -> Rc<RefCell<Controller>> {
+    pub fn new(parent: Weak<RefCell<super::Controller>>)
+    -> Rc<RefCell<Controller>> {
         let pa = PortAudio::new().expect("Could not initialize PortAudio");
         let window = WindowBuilder::new()
             .name("settings").type_(WindowType::Toplevel)
@@ -64,10 +76,39 @@ impl Controller {
         audiodev_view.pack_start(&renderer, true);
         audiodev_view.add_attribute(&renderer, "text", 1);
         big_view.add(&audiodev_view);
-        big_view.pack_start(&SeparatorBuilder::new()
-                          .orientation(Orientation::Horizontal).build(),
-                          true, true, 6);
+        // The music paths!
+        big_view.add(&LabelBuilder::new()
+                     .label("Music Locations:").halign(Align::Start).build());
+        let locations_window = ScrolledWindowBuilder::new()
+            .name("locations")
+            .hscrollbar_policy(PolicyType::Never)
+            .vscrollbar_policy(PolicyType::Automatic)
+            .vexpand(true)
+            .build();
+        let locations_view = TreeViewBuilder::new()
+            .headers_visible(false).reorderable(true).build();
+        let location_column = TreeViewColumn::new();
+        let location_cell = CellRendererText::new();
+        location_column.pack_start(&location_cell, true);
+        location_column.add_attribute(&location_cell, "text", 0);
+        locations_view.append_column(&location_column);
+        locations_window.add(&locations_view);
+        big_view.add(&locations_window);
+        let location_button_box = ButtonBoxBuilder::new()
+            .layout_style(ButtonBoxStyle::Expand)
+            .build();
+        let delete_location_button
+            = ToolButtonBuilder::new().icon_name("list-remove").build();
+        delete_location_button.set_sensitive(false);
+        location_button_box.add(&delete_location_button);
+        let new_location_button
+            = ToolButtonBuilder::new().icon_name("list-add").build();
+        location_button_box.add(&new_location_button);
+        big_view.add(&location_button_box);
         // The buttons!
+        big_view.pack_start(&SeparatorBuilder::new()
+                            .orientation(Orientation::Horizontal).build(),
+                            false, true, 6);
         let buttons_box = BoxBuilder::new()
             .orientation(Orientation::Horizontal).build();
         let button_box = ButtonBoxBuilder::new()
@@ -87,17 +128,28 @@ impl Controller {
         let ret = Rc::new(RefCell::new(Controller {
             window,
             pa,
+            parent,
             hostapi_view,
             audiodev_view,
+            locations_model: ListStore::new(&[Type::String]),
+            locations_view,
             apply_button,
             cancel_button,
             ok_button,
+            delete_location_button,
+            new_location_button,
             hostapi_model: ListStore::new(&[Type::U32, Type::String]),
             audiodev_model: ListStore::new(&[Type::U32, Type::String]),
             me: None
         }));
         let mut this = ret.borrow_mut();
         this.me = Some(Rc::downgrade(&ret));
+        let controller = ret.clone();
+        this.window.connect_delete_event(move |window, _| {
+            let _ = controller.try_borrow_mut()
+                .map(|mut x| x.cleanup());
+            window.hide_on_delete()
+        });
         let controller = ret.clone();
         this.hostapi_view.connect_property_active_notify(move |_| {
             let _ = controller.try_borrow_mut()
@@ -118,6 +170,21 @@ impl Controller {
             let _ = controller.try_borrow_mut()
                 .map(|mut x| x.clicked_ok());
         });
+        let controller = ret.clone();
+        this.delete_location_button.connect_clicked(move |_| {
+            let _ = controller.try_borrow_mut()
+                .map(|mut x| x.clicked_delete_location());
+        });
+        let controller = ret.clone();
+        this.new_location_button.connect_clicked(move |_| {
+            let _ = controller.try_borrow_mut()
+                .map(|mut x| x.clicked_new_location());
+        });
+        let delete_location_button = this.delete_location_button.clone();
+        this.locations_view.connect_cursor_changed(move |locations_view| {
+            delete_location_button.set_sensitive
+                (locations_view.get_cursor().0.is_some())
+        });
         drop(this);
         ret
     }
@@ -125,7 +192,7 @@ impl Controller {
         self.populate_audiodev();
     }
     fn populate_hostapi(&mut self) {
-        self.hostapi_model = ListStore::new(&[Type::U32, Type::String]);
+        self.hostapi_model.clear();
         let default_index = self.pa.default_host_api().unwrap();
         let selected_index = prefs::get_chosen_audio_api(&self.pa);
         let mut selected_iter = None;
@@ -169,7 +236,7 @@ impl Controller {
         let selected_api_index = self.get_selected_api();
         let selected_api_info = self.pa.host_api_info(selected_api_index)
             .unwrap();
-        self.audiodev_model = ListStore::new(&[Type::U32, Type::String]);
+        self.audiodev_model.clear();
         let new_row = self.audiodev_model.append();
         self.audiodev_model.set_value(&new_row, 1,
                                       &"Default Device".to_value());
@@ -216,7 +283,15 @@ impl Controller {
         self.audiodev_view.set_model(Some(&self.audiodev_model));
         self.audiodev_view.set_active_iter(selected_iter.as_ref());
     }
-    fn clicked_apply(&mut self) {
+    fn populate_locations(&mut self) {
+        let src = prefs::get_music_paths();
+        self.locations_model.clear();
+        for path in src.iter() {
+            self.locations_model.insert_with_values(None, &[0], &[&path]);
+        }
+        self.locations_view.set_model(Some(&self.locations_model));
+    }
+    fn clicked_apply(&mut self) -> Option<()> {
         let api_index = self.get_selected_api();
         let dev_index = self.get_selected_dev();
         let api_info = self.pa.host_api_info(api_index)
@@ -229,9 +304,22 @@ impl Controller {
         });
         prefs::set_chosen_audio_api_and_device(&self.pa, api_index,
                                                api_info.name, dev);
+        let mut dirs = Vec::new();
+        self.locations_model.foreach(|model, _path, iter| {
+            let value = model.get_value(&iter, 0);
+            match value.get::<String>() {
+                Ok(Some(x)) => dirs.push(x),
+                _ => (),
+            }
+            false
+        });
+        prefs::set_music_paths(dirs);
+        let parent = self.parent.upgrade()?;
+        parent.try_borrow_mut().ok()?.rescan();
+        None
     }
     fn clicked_cancel(&mut self) {
-        self.window.hide();
+        self.window.close();
     }
     fn clicked_ok(&mut self) {
         self.clicked_apply();
@@ -243,10 +331,45 @@ impl Controller {
                 return
             },
         }
-        self.window.hide();
+        self.window.close();
+    }
+    fn clicked_delete_location(&mut self) -> Option<()> {
+        let wo = self.locations_view.get_cursor().0?;
+        self.locations_model.get_iter(&wo)
+            .map(|x| self.locations_model.remove(&x));
+        None
+    }
+    fn clicked_new_location(&mut self) -> Option<()> {
+        let dialog = FileChooserDialog::with_buttons
+            (Some("Choose Music Location"), Some(&self.window),
+             FileChooserAction::SelectFolder,
+             &[("_Cancel", ResponseType::Cancel),
+               ("_Open", ResponseType::Accept)]);
+        let response = dialog.run();
+        dialog.close();
+        if response != ResponseType::Accept { return None }
+        let path = dialog.get_filename()?;
+        let path = path.into_os_string();
+        let path = match path.into_string() {
+            Ok(x) => x,
+            Err(_) => {
+                // TODO: Error dialog
+                eprintln!("That path contains invalid Unicode characters. We \
+                           don't support such paths.");
+                return None
+            },
+        };
+        self.locations_model.insert_with_values(None, &[0], &[&path]);
+        None
+    }
+    fn cleanup(&mut self) {
+        self.locations_model.clear();
+        self.audiodev_model.clear();
+        self.hostapi_model.clear();
     }
     pub fn show(&mut self) {
         self.populate_hostapi();
+        self.populate_locations();
         self.window.show_all();
     }
 }
