@@ -158,6 +158,17 @@ pub fn update_playlist_rule_code(id: PlaylistID, new_code: &str) {
                            params![new_code, id.as_inner() as i64]));
 }
 
+pub fn update_playlist_rule_code_and_columns(id: PlaylistID, new_code: &str,
+                                             columns: &[playlist::Column]) {
+    let new_code = if new_code == "" { None } else { Some(new_code) };
+    let columns = json::to_string(columns).unwrap();
+    let lock = DATABASE.lock();
+    let database = lock.as_ref().unwrap().as_ref().unwrap().borrow_mut();
+    dbtry(database.execute("UPDATE Playlists SET rule_code = ?, columns = ? \
+                            WHERE id = ?;",
+                           params![new_code, columns, id.as_inner() as i64]));
+}
+
 pub fn update_playlist_shuffled(id: PlaylistID, shuffled: bool) {
     let lock = DATABASE.lock();
     let database = lock.as_ref().unwrap().as_ref().unwrap().borrow_mut();

@@ -57,27 +57,27 @@ impl Controller {
         let window = WindowBuilder::new()
             .name("settings").type_(WindowType::Toplevel)
             .title("Tsong - Settings").build();
-        let big_view = BoxBuilder::new()
+        let big_box = BoxBuilder::new()
             .name("settings").spacing(4).orientation(Orientation::Vertical)
             .build();
-        window.add(&big_view);
-        big_view.add(&LabelBuilder::new()
+        window.add(&big_box);
+        big_box.add(&LabelBuilder::new()
                      .label("Audio API:").halign(Align::Start).build());
         let renderer = CellRendererText::new();
         let hostapi_view = ComboBoxBuilder::new()
             .name("hostapi_view").build();
         hostapi_view.pack_start(&renderer, true);
         hostapi_view.add_attribute(&renderer, "text", 1);
-        big_view.add(&hostapi_view);
-        big_view.add(&LabelBuilder::new()
+        big_box.add(&hostapi_view);
+        big_box.add(&LabelBuilder::new()
                     .label("Audio Device:").halign(Align::Start).build());
         let audiodev_view = ComboBoxBuilder::new()
             .name("audiodev_view").build();
         audiodev_view.pack_start(&renderer, true);
         audiodev_view.add_attribute(&renderer, "text", 1);
-        big_view.add(&audiodev_view);
+        big_box.add(&audiodev_view);
         // The music paths!
-        big_view.add(&LabelBuilder::new()
+        big_box.add(&LabelBuilder::new()
                      .label("Music Locations:").halign(Align::Start).build());
         let locations_window = ScrolledWindowBuilder::new()
             .name("locations")
@@ -93,7 +93,7 @@ impl Controller {
         location_column.add_attribute(&location_cell, "text", 0);
         locations_view.append_column(&location_column);
         locations_window.add(&locations_view);
-        big_view.add(&locations_window);
+        big_box.add(&locations_window);
         let location_button_box = ButtonBoxBuilder::new()
             .layout_style(ButtonBoxStyle::Expand)
             .build();
@@ -104,9 +104,9 @@ impl Controller {
         let new_location_button
             = ToolButtonBuilder::new().icon_name("list-add").build();
         location_button_box.add(&new_location_button);
-        big_view.add(&location_button_box);
+        big_box.add(&location_button_box);
         // The buttons!
-        big_view.pack_start(&SeparatorBuilder::new()
+        big_box.pack_start(&SeparatorBuilder::new()
                             .orientation(Orientation::Horizontal).build(),
                             false, true, 6);
         let buttons_box = BoxBuilder::new()
@@ -124,7 +124,7 @@ impl Controller {
         ok_button.get_style_context().add_class("suggested-action");
         button_box.pack_end(&ok_button, false, true, 0);
         buttons_box.pack_end(&button_box, false, true, 0);
-        big_view.add(&buttons_box);
+        big_box.add(&buttons_box);
         let ret = Rc::new(RefCell::new(Controller {
             window,
             pa,
@@ -182,6 +182,8 @@ impl Controller {
         });
         let delete_location_button = this.delete_location_button.clone();
         this.locations_view.connect_cursor_changed(move |locations_view| {
+            // this doesn't reference Controller because we *want* it to update
+            // automatically, even when we caused the change
             delete_location_button.set_sensitive
                 (locations_view.get_cursor().0.is_some())
         });
@@ -307,7 +309,7 @@ impl Controller {
         let mut dirs = Vec::new();
         self.locations_model.foreach(|model, _path, iter| {
             let value = model.get_value(&iter, 0);
-            match value.get::<String>() {
+            match value.get() {
                 Ok(Some(x)) => dirs.push(x),
                 _ => (),
             }

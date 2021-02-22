@@ -42,7 +42,10 @@
 #scan_spinner {
     margin-right: 1em;
 }
-box#settings {
+box#settings, box#playlist_editor {
     margin: 4px 8px 4px 8px;
     min-width: 500px;
+}
+box#playlist_editor scrolledwindow#columns {
+    min-height: 200px;
 }

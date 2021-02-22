@@ -73,7 +73,7 @@ impl PlaylistID {
     }
 }
 
-#[derive(Debug,Clone,Serialize,Deserialize)]
+#[derive(Debug,Clone,Serialize,Deserialize,PartialEq,Eq)]
 pub struct Column {
     pub tag: String,
     pub width: u32,
@@ -124,6 +124,8 @@ pub struct Playlist {
 const PLAYLIST_CODE_LIBRARY: &str = include_str!("lua/playlist_lib.lua");
 const PLAYLIST_CODE_STUB: &str = include_str!("lua/playlist_stub.lua");
 
+pub const DEFAULT_COLUMN_WIDTH: u32 = 117;
+
 lazy_static! {
     static ref TOP_LEVEL_PLAYLISTS
         : RwLock<Vec<PlaylistRef>>
@@ -141,9 +143,9 @@ lazy_static! {
             Column{tag:"duration".to_owned(),
                    width:50},
             Column{tag:"artist".to_owned(),
-                   width:117},
+                   width:DEFAULT_COLUMN_WIDTH},
             Column{tag:"album".to_owned(),
-                   width:117}
+                   width:DEFAULT_COLUMN_WIDTH}
         ];
     pub static ref DEFAULT_SORT_ORDER
         : Vec<(String,bool)>
@@ -171,6 +173,21 @@ impl Playlist {
         self.refresh_with_code(Some(&neu))?;
         self.rule_code = neu;
         Ok(db::update_playlist_rule_code(self.id, &self.rule_code))
+    }
+    /// Checks the validity of the given rule code. Returns:
+    /// - `Err("...")` → the rule code is invalid and we made no change
+    /// - `Ok(...)` → the rule code is valid and we made the change
+    pub fn set_rule_code_and_columns(&mut self, neu_code: String,
+                                     neu_columns: Vec<Column>)
+    -> Result<(), String> {
+        self.refresh_with_code(Some(&neu_code))?;
+        if self.columns != neu_columns {
+            self.self_generation.bump();
+        }
+        self.rule_code = neu_code;
+        self.columns = neu_columns;
+        Ok(db::update_playlist_rule_code_and_columns(self.id, &self.rule_code,
+                                                     &self.columns))
     }
     pub fn get_columns(&self) -> &[Column] { &self.columns[..] }
     pub fn resize_column(&mut self, tag: &str, width: u32) {
@@ -234,17 +251,10 @@ impl Playlist {
     pub fn is_shuffled(&self) -> bool {
         self.shuffled
     }
-    fn refresh_with_code(&mut self, rule_code: Option<&str>)
-    -> Result<(), String> {
-        let rule_code = match rule_code {
-            None => &self.rule_code,
-            Some(x) => x,
-        };
-        // TODO: request fewer libraries
-        // TODO 2: don't create a state at all if there's no code to run
-        let lua = Lua::new();
-        let compiled_song_rule = if rule_code.len() == 0 {
-            None
+    fn compile_song_rule<'a>(lua: &'a Lua, rule_code: &str)
+    -> Result<Option<mlua::Function<'a>>, String> {
+        if rule_code.len() == 0 {
+            Ok(None)
         }
         else {
             match lua.load(&PLAYLIST_CODE_LIBRARY[..]).exec() {
@@ -260,8 +270,24 @@ impl Playlist {
                 Ok(x) => x,
                 Err(x) => return Err(format!("{}", x)),
             };
-            Some(func)
+            Ok(Some(func))
+        }
+    }
+    pub fn syntax_check_rule_code(rule_code: &str) -> Result<(), String> {
+        let lua = Lua::new();
+        Self::compile_song_rule(&lua, rule_code)?;
+        Ok(())
+    }
+    fn refresh_with_code(&mut self, rule_code: Option<&str>)
+    -> Result<(), String> {
+        let rule_code = match rule_code {
+            None => &self.rule_code,
+            Some(x) => x,
         };
+        // TODO: request fewer libraries
+        // TODO 2: don't create a state at all if there's no code to run
+        let lua = Lua::new();
+        let compiled_song_rule = Self::compile_song_rule(&lua, rule_code)?;
         let (list, library_generation) = logical::get_all_songs_for_read();
         let mut new_songs = Vec::new();
         let mut seen = HashSet::new();

@@ -29,7 +29,6 @@ use gtk::{
     TreeView, TreeViewBuilder, TreeViewColumn,
     VolumeButton, VolumeButtonBuilder,
     Widget,
-    Window, WindowBuilder, WindowType,
 };
 use gdk::{
     Geometry,
@@ -50,14 +49,7 @@ use std::{
 };
 
 mod settings;
-
-// TODO: this should be fluent...
-const PLAYLIST_CODE_TOOLTIP: &str =
-    "Enter playlist code here, e.g.:\n\
-     \n\
-     album:contains \"Moonlight\" or artist:starts_with \"The Answer\"\n\
-     \n\
-     Leave empty to include only manually added songs.";
+mod playlist_edit;
 
 /// Fallback labels for missing icons.
 mod fallback {
@@ -85,7 +77,6 @@ pub struct Controller {
     next_button: Button,
     osd: Label,
     play_button: Button,
-    playlist_code: Entry,
     playlist_name: Entry,
     playlist_model: Option<ListStore>,
     playlist_name_cell: CellRendererText,
@@ -118,9 +109,9 @@ pub struct Controller {
     scan_thread: ScanThread,
     rolled_down_height: i32,
     settings_controller: Option<Rc<RefCell<settings::Controller>>>,
+    playlist_edit_controller: Option<Rc<RefCell<playlist_edit::Controller>>>,
     periodic_timer: Option<SourceId>,
     volume_changed: bool,
-    playlist_editor_window: Window,
     me: Option<Weak<RefCell<Controller>>>,
 }
 
@@ -224,30 +215,29 @@ impl Controller {
         // and the play...list
         let playlist_itself_box = BoxBuilder::new()
             .name("playlist").orientation(Orientation::Vertical).build();
-        let playlist_meta_box = ButtonBoxBuilder::new()
+        let playlist_control_box = ButtonBoxBuilder::new()
             .name("meta").layout_style(ButtonBoxStyle::Expand)
             .homogeneous(false)
             .orientation(Orientation::Horizontal).build();
         // make the right edge merge with the window edge :)
-        playlist_meta_box.pack_end(&BoxBuilder::new().build(), false, false, 0);
+        playlist_control_box.pack_end(&BoxBuilder::new().build(), false, false, 0);
         // Button to change shuffle mode:
         let shuffle_button = ToggleButtonBuilder::new()
             .name("shuffle").build();
-        playlist_meta_box.pack_start(&shuffle_button, false, false, 0);
+        playlist_control_box.pack_start(&shuffle_button, false, false, 0);
         // Button to change loop mode:
         let playmode_button = ToggleButtonBuilder::new()
             .name("playmode").build();
-        playlist_meta_box.pack_start(&playmode_button, false, false, 0);
+        playlist_control_box.pack_start(&playmode_button, false, false, 0);
         // The playlist name:
         let playlist_name = EntryBuilder::new().hexpand(true)
             .build();
-        playlist_meta_box.pack_start(&playlist_name, true, true, 0);
+        playlist_control_box.pack_start(&playlist_name, true, true, 0);
         // Button to edit playlist settings:
         let playlist_edit_button = ButtonBuilder::new()
             .name("edit_playlist").label("Edit").build();
-        playlist_meta_box.pack_end(&playlist_edit_button, false, false, 0);
-        // TODO: make this a monospace font?
-        playlist_itself_box.add(&playlist_meta_box);
+        playlist_control_box.pack_end(&playlist_edit_button, false, false, 0);
+        playlist_itself_box.add(&playlist_control_box);
         // The playlist itself:
         let playlist_window = ScrolledWindowBuilder::new()
             .hscrollbar_policy(PolicyType::Automatic)
@@ -268,23 +258,6 @@ impl Controller {
         bottom_overlay.add_overlay(&scan_spinner);
         rollup_grid.attach(&bottom_overlay, 2, 1, 1, 1);
         outer_box.add(&rollup_grid);
-        // now, last but not least, the "playlist editor" window
-        let playlist_editor_window = WindowBuilder::new()
-            .name("playlist_editor").type_(WindowType::Toplevel)
-            .title("Tsong - Playlist Editor").build();
-        playlist_editor_window.connect_delete_event(move |window, _| {
-            window.hide_on_delete()
-        });
-        let playlist_editor_box = BoxBuilder::new()
-            .name("playlist_editor").orientation(Orientation::Vertical)
-            .build();
-        playlist_editor_window.add(&playlist_editor_box);
-        // The playlist code:
-        let playlist_code = EntryBuilder::new().hexpand(true)
-            .placeholder_text("Manually added songs only")
-            .tooltip_text(PLAYLIST_CODE_TOOLTIP)
-            .build();
-        playlist_editor_box.add(&playlist_code);
         // done setting up the widgets, time to bind everything to the
         // controller
         let mut scan_thread = ScanThread::new();
@@ -305,30 +278,30 @@ impl Controller {
         let nu = Rc::new(RefCell::new(Controller {
             rollup_button, settings_button, prev_button, next_button,
             shuffle_button, playmode_button, play_button, volume_button,
-            playlists_view, playlist_view, playlist_code,
+            playlists_view, playlist_view, playlist_name,
             playlists_model, playlist_model, playlist_stats, osd,
             scan_spinner, scan_thread, rollup_grid, control_box,
             new_playlist_button, delete_playlist_button,
             playlist_name_column, playlist_name_cell, window,
-            playlist_edit_button, playlist_editor_window,
-            playlist_name,
+            playlist_edit_button,
             prev_icon: None, next_icon: None,
             play_icon: None, pause_icon: None,
             rollup_icon: None, rolldown_icon: None, settings_icon: None,
             loop_icon: None, loop_one_icon: None, shuffle_icon: None,
             active_playlist: None, playlist_generation: Default::default(),
             last_built_playlist: None, me: None, settings_controller: None,
-            rolled_down_height: 400, periodic_timer: None,
-            volume_changed: false,
+            playlist_edit_controller: None, rolled_down_height: 400,
+            periodic_timer: None, volume_changed: false,
         }));
-        // Throughout this function, we make use of a hack.
-        // Each signal that depends on the Controller starts with an attempt to
+        // Throughout this application, we make use of a hack.
+        // Each signal that depends on a Controller starts with an attempt to
         // mutably borrow the controller. If said attempt fails, that means
         // that the signal was raised by other code called from within the
         // controller, so we ignore the signal.
         let mut this = nu.borrow_mut();
         this.me = Some(Rc::downgrade(&nu));
         this.settings_controller = Some(settings::Controller::new(Rc::downgrade(&nu)));
+        this.playlist_edit_controller = Some(playlist_edit::Controller::new(Rc::downgrade(&nu)));
         this.delete_playlist_button
             .set_sensitive(this.delete_playlist_button_should_be_sensitive());
         this.reload_icons();
@@ -339,12 +312,7 @@ impl Controller {
                 .map(|mut x| x.update_volume(value));
         });
         let controller = nu.clone();
-        this.playlist_code.connect_property_text_notify(move |_| {
-            let _ = controller.try_borrow()
-                .map(|x| x.update_playlist_code());
-        });
-        let controller = nu.clone();
-        this.playlist_name.connect_editing_done(move |_| {
+        this.playlist_name.connect_property_text_notify(move |_| {
             let _ = controller.try_borrow()
                 .map(|x| x.edited_playlist_name_in_entry());
         });
@@ -524,9 +492,9 @@ impl Controller {
              */
             tvc.pack_start(&cell, true);
             if column.tag == "duration" || column.tag == "year"
-            || column.tag.ends_with("_number") {
+            || column.tag.ends_with("_number") || column.tag.ends_with("#") {
                 cell.set_alignment(1.0, 0.5);
-                tvc.set_alignment(1.0);
+                // tvc.set_alignment(1.0);
             }
             tvc.add_attribute(&cell, "text", column_index as i32);
             // TODO: i18n this
@@ -645,13 +613,14 @@ impl Controller {
             return
         }
         self.active_playlist = Some(playlist_ref.clone());
+        let _ =
+            self.playlist_edit_controller.as_ref().unwrap().try_borrow_mut()
+            .map(|mut x| x.activate_playlist(self.active_playlist.as_ref()
+                                             .cloned()));
         self.playlist_generation.destroy();
         let playlist = playlist_ref.read().unwrap();
         self.playlist_name.set_text(playlist.get_name());
-        self.playlist_code.set_text(playlist.get_rule_code());
         drop(playlist);
-        let style_context = self.playlist_code.get_style_context();
-        style_context.remove_class("error");
         self.rebuild_playlist_view();
         let selection = self.playlists_view.get_selection();
         selection.select_path(wo);
@@ -753,24 +722,6 @@ impl Controller {
         drop(playlist);
         self.rebuild_playlist_view();
     }
-    fn update_playlist_code(&self) {
-        let value = self.playlist_code.get_text();
-        if let Some(playlist) = self.active_playlist.as_ref() {
-            let mut playlist = playlist.write().unwrap();
-            let style_context = self.playlist_code.get_style_context();
-            match playlist.set_rule_code(value.into()) {
-                Err(x) => {
-                    style_context.add_class("error");
-                    self.playlist_code.set_tooltip_text(Some(&x));
-                },
-                Ok(_) => {
-                    style_context.remove_class("error");
-                    self.playlist_code
-                        .set_tooltip_text(Some(PLAYLIST_CODE_TOOLTIP));
-                }
-            }
-        }
-    }
     fn clicked_play(&mut self) {
         let status = playback::get_playback_status();
         if status.is_playing() {
@@ -799,16 +750,17 @@ impl Controller {
         let playlist = value_to_playlist_id(value)
             .and_then(playlist::get_playlist_by_id)?;
         self.playlists_model.set_value(&iter, 1, &Value::from(nu));
-        self.playlist_name.set_text(&nu);
+        if Some(&playlist) == self.active_playlist.as_ref() {
+            self.playlist_name.set_text(&nu);
+        }
         playlist.write().unwrap().set_name(nu.to_owned());
         None
     }
     fn edited_playlist_name_in_entry(&self) -> Option<()> {
+        let playlist = self.active_playlist.as_ref()?;
         let wo = self.playlists_view.get_cursor().0?;
         let iter = self.playlists_model.get_iter(&wo)?;
-        let value = self.playlists_model.get_value(&iter, 0);
-        let playlist = value_to_playlist_id(value)
-            .and_then(playlist::get_playlist_by_id)?;
+        // TODO: make sure this is the right playlist!
         let nu = self.playlist_name.get_text().to_string();
         self.playlists_model.set_value(&iter, 1, &nu.to_value());
         playlist.write().unwrap().set_name(nu.to_owned());
@@ -987,13 +939,10 @@ impl Controller {
             .show();
         None
     }
-    fn clicked_playlist_edit(&mut self) {
-        if !self.playlist_editor_window.is_visible() {
-            self.playlist_editor_window.show_all();
-        }
-        else {
-            self.playlist_editor_window.present();
-        }
+    fn clicked_playlist_edit(&mut self) -> Option<()> {
+        self.playlist_edit_controller.as_ref().unwrap().try_borrow_mut().ok()?
+            .show();
+        None
     }
     fn rescan(&mut self) {
         match self.scan_thread.rescan(prefs::get_music_paths()) {
@@ -1005,6 +954,12 @@ impl Controller {
     fn update_volume(&mut self, nu: f64) {
         prefs::set_volume((nu * 100.0).floor() as i32);
         self.volume_changed = true;
+    }
+    fn edit_playlist(&mut self, neu_code: String,
+                     neu_columns: Vec<playlist::Column>) {
+        self.active_playlist.as_ref()
+            .map(|x| x.write().unwrap()
+                 .set_rule_code_and_columns(neu_code, neu_columns));
     }
 }
 
