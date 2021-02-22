@@ -383,6 +383,85 @@ impl Controller {
             let _ = controller.try_borrow_mut()
                 .map(|mut x| x.clicked_playlist_edit());
         });
+        let controller = nu.clone();
+        this.window.connect_key_press_event(move |window, evt| {
+            if window.activate_key(evt) { return Inhibit(true) }
+            if !window.get_focus().map(|x| x.is::<Entry>()).unwrap_or(false) {
+                let keyval = evt.get_keyval();
+                use gdk::keys::constants as key;
+                match keyval {
+                    key::space => {
+                        let _ = controller.try_borrow_mut()
+                            .map(|mut x| x.hotkey_playpause());
+                        return Inhibit(true)
+                    },
+                    key::Left => {
+                        let _ = controller.try_borrow_mut()
+                            .map(|mut x| x.hotkey_left());
+                        return Inhibit(true)
+                    },
+                    key::Right => {
+                        let _ = controller.try_borrow_mut()
+                            .map(|mut x| x.hotkey_right());
+                        return Inhibit(true)
+                    },
+                    // TODO: handle AudioForward and AudioRewind in another way
+                    key::AudioCycleTrack | key::AudioForward
+                    | key::AudioNext => {
+                        let _ = controller.try_borrow_mut()
+                            .map(|mut x| x.hotkey_next());
+                        return Inhibit(true)
+                    },
+                    key::AudioRewind | key::AudioPrev => {
+                        let _ = controller.try_borrow_mut()
+                            .map(|mut x| x.hotkey_prev());
+                        return Inhibit(true)
+                    },
+                    key::AudioLowerVolume => {
+                        let _ = controller.try_borrow_mut()
+                            .map(|mut x| x.hotkey_quieten());
+                        return Inhibit(true)
+                    },
+                    key::AudioRaiseVolume => {
+                        let _ = controller.try_borrow_mut()
+                            .map(|mut x| x.hotkey_louden());
+                        return Inhibit(true)
+                    },
+                    key::AudioMute => {
+                        let _ = controller.try_borrow_mut()
+                            .map(|mut x| x.hotkey_mute());
+                        return Inhibit(true)
+                    },
+                    key::AudioPause => {
+                        let _ = controller.try_borrow_mut()
+                            .map(|mut x| x.hotkey_pause());
+                        return Inhibit(true)
+                    },
+                    key::AudioPlay => {
+                        let _ = controller.try_borrow_mut()
+                            .map(|mut x| x.hotkey_play());
+                        return Inhibit(true)
+                    },
+                    key::AudioStop => {
+                        let _ = controller.try_borrow_mut()
+                            .map(|mut x| x.hotkey_stop());
+                        return Inhibit(true)
+                    },
+                    key::AudioRandomPlay => {
+                        let _ = controller.try_borrow_mut()
+                            .map(|mut x| x.hotkey_shuffle());
+                        return Inhibit(true)
+                    },
+                    key::AudioRepeat => {
+                        let _ = controller.try_borrow_mut()
+                            .map(|mut x| x.hotkey_playmode());
+                        return Inhibit(true)
+                    },
+                    _ => ()
+                }
+            }
+            return Inhibit(false)
+        });
         this.activate_playlist_by_path(&TreePath::new_first());
         this.force_periodic();
         // okay, show the window and away we go
@@ -960,6 +1039,64 @@ impl Controller {
         self.active_playlist.as_ref()
             .map(|x| x.write().unwrap()
                  .set_rule_code_and_columns(neu_code, neu_columns));
+    }
+    fn hotkey_playpause(&mut self) {
+        self.clicked_play()
+    }
+    fn hotkey_left(&mut self) {
+        // TODO: RTL
+        self.hotkey_prev()
+    }
+    fn hotkey_right(&mut self) {
+        // TODO: RTL
+        self.hotkey_next()
+    }
+    fn hotkey_prev(&mut self) {
+        playback::send_command(PlaybackCommand::Prev)
+    }
+    fn hotkey_next(&mut self) {
+        playback::send_command(PlaybackCommand::Next)
+    }
+    fn hotkey_quieten(&mut self) {
+        eprintln!("TODO: quieten");
+    }
+    fn hotkey_louden(&mut self) {
+        eprintln!("TODO: louden");
+    }
+    fn hotkey_mute(&mut self) {
+        eprintln!("TODO: mute");
+    }
+    fn hotkey_pause(&mut self) {
+        playback::send_command(PlaybackCommand::Pause)
+    }
+    fn hotkey_play(&mut self) {
+        let status = playback::get_playback_status();
+        if status.is_playing() {
+            // unlike when PlayPause is clicked, do nothing
+        }
+        else {
+            let song_to_play = if status == PlaybackStatus::Stopped {
+                playback::set_future_playlist(self.active_playlist.clone());
+                let playlist_model = self.playlist_model.as_ref().unwrap();
+                self.playlist_view.get_cursor().0
+                    .and_then(|x| playlist_model.get_iter(&x))
+                    .map(|x| playlist_model.get_value(&x, 0))
+                    .and_then(value_to_song_id)
+                    .and_then(logical::get_song_by_song_id)
+            } else { None };
+            playback::send_command(PlaybackCommand::Play(song_to_play));
+            set_image(&self.play_button, &self.pause_icon, fallback::PAUSE);
+            self.force_periodic();
+        }
+    }
+    fn hotkey_stop(&mut self) {
+        playback::send_command(PlaybackCommand::Stop)
+    }
+    fn hotkey_shuffle(&mut self) {
+        self.clicked_shuffle();
+    }
+    fn hotkey_playmode(&mut self) {
+        self.clicked_playmode();
     }
 }
 
