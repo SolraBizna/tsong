@@ -9,6 +9,7 @@ use std::{
     sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
+use alphanumeric_sort::compare_str;
 use serde::{Serialize,Deserialize};
 use mlua::Lua;
 use lazy_static::lazy_static;
@@ -369,9 +370,7 @@ impl Playlist {
                         .unwrap_or("");
                     let b_value = b.get_metadata().get(key).map(String::as_str)
                         .unwrap_or("");
-                    // TODO: numeric-friendly, and otherwise internationalized,
-                    // sort
-                    let ordering = a_value.cmp(b_value);
+                    let ordering = compare_str(a_value, b_value);
                     let ordering = if *desc {ordering.reverse()} else {ordering};
                     if ordering != Ordering::Equal { return ordering }
                 }

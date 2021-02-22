@@ -6,6 +6,7 @@ edition = "2018"
 license = "MIT"
 
 [dependencies]
+alphanumeric-sort = "1.4"
 arrayref = "0.3.6"
 gtk = {version = "0.9.0", features = ["v3_16"]}
 gio = {version = "", features = ["v2_44"]}
