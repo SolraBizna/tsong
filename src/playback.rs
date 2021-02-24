@@ -122,6 +122,9 @@ struct InternalState {
     /// The playback thread will update this to reflect the current playback
     /// state, as it changes in response to commands.
     status: PlaybackStatus,
+    /// Whether we are currently muted. When we're muted, we pretend our volume
+    /// is set to zero.
+    muted: bool,
 }
 
 lazy_static! {
@@ -214,8 +217,11 @@ fn playback_callback(args: OutputCallbackArgs<f32>) -> StreamCallbackResult {
     else {
         time.buffer_dac
     };
-    let volume = prefs::get_volume() as f32 / 100.0;
-    let volume = volume * volume;
+    let volume = if STATE.lock().unwrap().muted { 0.0 }
+    else {
+        let volume = prefs::get_volume() as f32 / 100.0;
+        volume * volume
+    };
     let mut rem = buffer;
     let mut queue = FRAME_QUEUE.lock().unwrap();
     let current_audio_format = *CURRENT_AUDIO_FORMAT.lock().unwrap();
@@ -747,3 +753,10 @@ impl InternalState {
     }
 }
 
+/// Returns whether mute is now active.
+pub fn toggle_mute() -> bool {
+    // TODO: reduce the lag time on the mute button
+    let mut state = STATE.lock().unwrap();
+    state.muted = !state.muted;
+    state.muted
+}

@@ -1204,7 +1204,14 @@ impl Controller {
         self.volume_changed = true;
     }
     fn hotkey_mute(&mut self) {
-        eprintln!("TODO: mute");
+        if playback::toggle_mute() {
+            // we are now muted
+            self.volume_button.set_value(0.0);
+        }
+        else {
+            // we are no longer muted
+            self.volume_button.set_value(prefs::get_volume() as f64 / 100.0);
+        }
     }
     fn hotkey_set_volume(&mut self, nu: f64) {
         self.volume_button.set_value(nu);
