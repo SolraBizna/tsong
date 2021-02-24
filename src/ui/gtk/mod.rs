@@ -1188,10 +1188,20 @@ impl Controller {
         playback::send_command(PlaybackCommand::Next)
     }
     fn hotkey_quieten(&mut self) {
-        eprintln!("TODO: quieten");
+        let cur_volume = prefs::get_volume();
+        let nu_volume = (cur_volume - 5).max(prefs::MIN_VOLUME);
+        if cur_volume == nu_volume { return }
+        self.volume_button.set_value(nu_volume as f64 / 100.0);
+        prefs::set_volume(nu_volume);
+        self.volume_changed = true;
     }
     fn hotkey_louden(&mut self) {
-        eprintln!("TODO: louden");
+        let cur_volume = prefs::get_volume();
+        let nu_volume = (cur_volume + 5).max(prefs::MAX_VOLUME);
+        if cur_volume == nu_volume { return }
+        self.volume_button.set_value(nu_volume as f64 / 100.0);
+        prefs::set_volume(nu_volume);
+        self.volume_changed = true;
     }
     fn hotkey_mute(&mut self) {
         eprintln!("TODO: mute");
@@ -1200,6 +1210,7 @@ impl Controller {
         self.volume_button.set_value(nu);
         let nu = (nu.max(0.0).min(2.0) * 100.0 + 0.5).floor() as i32;
         prefs::set_volume(nu);
+        self.volume_changed = true;
     }
     fn hotkey_set_shuffle(&mut self, shuffle: bool) -> Option<()> {
         let playlist_ref = self.active_playlist.as_ref()?;
