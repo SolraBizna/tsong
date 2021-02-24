@@ -43,9 +43,14 @@ use glib::{
     Value,
 };
 use gio::prelude::*;
+use mpris_player::{
+    MprisPlayer,
+    OrgMprisMediaPlayer2Player,
+};
 use std::{
     cell::RefCell,
     rc::{Rc,Weak},
+    sync::Arc,
 };
 
 mod settings;
@@ -96,6 +101,9 @@ pub struct Controller {
     window: ApplicationWindow,
     playlist_generation: GenerationValue,
     scan_spinner: Spinner,
+    mpris_player: Arc<MprisPlayer>,
+    mpris_song: Option<LogicalSongRef>,
+    mpris_time: i64,
     prev_icon: Option<Image>,
     play_icon: Option<Image>,
     pause_icon: Option<Image>,
@@ -275,6 +283,9 @@ impl Controller {
         // (ignore errors because this is not critical to functionality)
         // (fun fact! if this is an f32 instead of an f64, it breaks!)
         let _ = playlist_name_cell.set_property("scale", &0.80);
+        let mpris_player = MprisPlayer::new("tsong".to_owned(),
+                                            "Tsong".to_owned(),
+                                            "tsong".to_owned());
         let nu = Rc::new(RefCell::new(Controller {
             rollup_button, settings_button, prev_button, next_button,
             shuffle_button, playmode_button, play_button, volume_button,
@@ -284,6 +295,7 @@ impl Controller {
             new_playlist_button, delete_playlist_button,
             playlist_name_column, playlist_name_cell, window,
             playlist_edit_button,
+            mpris_player, mpris_time: 0, mpris_song: None,
             prev_icon: None, next_icon: None,
             play_icon: None, pause_icon: None,
             rollup_icon: None, rolldown_icon: None, settings_icon: None,
@@ -462,6 +474,61 @@ impl Controller {
             }
             return Inhibit(false)
         });
+        let controller = nu.clone();
+        this.mpris_player.set_can_quit(true);
+        this.mpris_player.connect_quit(move || {
+            let _ = controller.try_borrow_mut()
+                .map(|mut x| x.hotkey_quit());
+        });
+        let controller = nu.clone();
+        this.mpris_player.set_can_raise(true);
+        this.mpris_player.connect_raise(move || {
+            let _ = controller.try_borrow_mut()
+                .map(|mut x| x.hotkey_raise());
+        });
+        let controller = nu.clone();
+        this.mpris_player.set_can_go_next(true);
+        this.mpris_player.connect_next(move || {
+            let _ = controller.try_borrow_mut()
+                .map(|mut x| x.hotkey_next());
+        });
+        let controller = nu.clone();
+        this.mpris_player.set_can_go_previous(true);
+        this.mpris_player.connect_previous(move || {
+            let _ = controller.try_borrow_mut()
+                .map(|mut x| x.hotkey_prev());
+        });
+        let controller = nu.clone();
+        this.mpris_player.set_can_play(true);
+        this.mpris_player.connect_play(move || {
+            let _ = controller.try_borrow_mut()
+                .map(|mut x| x.hotkey_play());
+        });
+        let controller = nu.clone();
+        this.mpris_player.set_can_pause(true);
+        this.mpris_player.connect_pause(move || {
+            let _ = controller.try_borrow_mut()
+                .map(|mut x| x.hotkey_pause());
+        });
+        // TODO: seek
+        //let controller = nu.clone();
+        //this.mpris_player.set_can_seek(true);
+        let controller = nu.clone();
+        this.mpris_player.connect_volume(move |nu| {
+            let _ = controller.try_borrow_mut()
+                .map(|mut x| x.hotkey_set_volume(nu));
+        });
+        let controller = nu.clone();
+        this.mpris_player.connect_shuffle(move |nu| {
+            let _ = controller.try_borrow_mut()
+                .map(|mut x| x.hotkey_set_shuffle(nu));
+        });
+        let controller = nu.clone();
+        this.mpris_player.connect_loop_status(move |nu| {
+            let _ = controller.try_borrow_mut()
+                .map(|mut x| x.hotkey_set_playmode(nu.into()));
+        });
+        this.mpris_player.set_can_control(true);
         this.activate_playlist_by_path(&TreePath::new_first());
         this.force_periodic();
         // okay, show the window and away we go
@@ -510,13 +577,16 @@ impl Controller {
                 self.playlist_generation.destroy();
                 self.shuffle_button.set_sensitive(false);
                 self.shuffle_button.set_active(false);
+                let _ = self.mpris_player.set_shuffle(false);
                 self.update_playmode_button();
                 return
             },
         };
         let playlist = playlist_ref.maybe_refreshed();
         self.shuffle_button.set_sensitive(true);
-        self.shuffle_button.set_active(playlist.is_shuffled());
+        let is_shuffled = playlist.is_shuffled();
+        self.shuffle_button.set_active(is_shuffled);
+        let _ = self.mpris_player.set_shuffle(is_shuffled);
         self.playlist_generation = playlist.get_playlist_generation();
         let mut types = Vec::with_capacity(playlist.get_columns().len() + 2);
         types.push(SONG_ID_TYPE); // Song ID
@@ -743,19 +813,70 @@ impl Controller {
         else {
             set_image(&self.play_button, &self.play_icon, fallback::PLAY);
         }
-        match active_song {
+        let active_song = match active_song {
             None => {
                 self.osd.set_label("");
+                None
             },
-            Some((song, time)) => {
-                let song = song.read().unwrap();
+            Some((song_ref, time)) => {
+                let song = song_ref.read().unwrap();
                 let metadata = song.get_metadata();
-                self.osd.set_label(&format!("{} - {}\n{} / {}",
-                                                metadata.get("title").map(String::as_str).unwrap_or("Unknown Title"),
-                                                metadata.get("artist").map(String::as_str).unwrap_or("Unknown Artist"),
-                                                pretty_duration(time.floor() as u32),
-                                                pretty_duration(song.get_duration())));
+                let mpris_time = (time * 1000000.0).floor() as i64;
+                if self.mpris_time != mpris_time {
+                    self.mpris_time = mpris_time;
+                    self.mpris_player.set_position(mpris_time);
+                }
+                self.osd.set_label
+                    (&format!("{} - {}\n{} / {}",
+                              metadata.get("title").map(String::as_str)
+                              .unwrap_or("Unknown Title"),
+                              metadata.get("artist").map(String::as_str)
+                              .unwrap_or("Unknown Artist"),
+                              pretty_duration(time.floor() as u32),
+                              pretty_duration(song.get_duration())));
+                drop(song);
+                Some(song_ref)
             },
+        };
+        if self.mpris_song != active_song {
+            self.mpris_song = active_song;
+            let mut mpris_metadata = mpris_player::Metadata {
+                length: None,
+                art_url: None,
+                album: None,
+                album_artist: None,
+                artist: None,
+                composer: None,
+                disc_number: None,
+                genre: None,
+                title: None,
+                track_number: None,
+                url: None,
+            };
+            if let Some(song_ref) = self.mpris_song.as_ref() {
+                let song = song_ref.read().unwrap();
+                mpris_metadata.length = Some(song.get_duration() as i64
+                                             * 1000000);
+                let song_metadata = song.get_metadata();
+                mpris_metadata.album = song_metadata.get("album")
+                    .map(|x| x.to_owned());
+                mpris_metadata.artist = song_metadata.get("artist")
+                    .map(|x| vec![x.to_owned()]);
+                mpris_metadata.composer = song_metadata.get("composer")
+                    .map(|x| vec![x.to_owned()]);
+                mpris_metadata.genre = song_metadata.get("genre")
+                    .map(|x| vec![x.to_owned()]);
+                mpris_metadata.title = song_metadata.get("title")
+                    .map(|x| x.to_owned());
+                // TODO: parse until first slash, skip spaces
+                mpris_metadata.track_number = song_metadata.get("track#")
+                    .and_then(|x| x.parse().ok());
+                mpris_metadata.disc_number = song_metadata.get("disc#")
+                    .and_then(|x| x.parse().ok());
+            }
+            // TODO: update mpris metadata if we edit the song's metadata while
+            // it's playing
+            self.mpris_player.set_metadata(mpris_metadata);
         }
     }
     fn update_scan_status(&mut self) {
@@ -865,8 +986,9 @@ impl Controller {
     }
     fn clicked_shuffle(&mut self) -> Option<()> {
         let playlist = self.active_playlist.as_ref()?;
-        self.shuffle_button.set_active(playlist.write().unwrap()
-                                       .toggle_shuffle());
+        let now_active = playlist.write().unwrap().toggle_shuffle();
+        self.shuffle_button.set_active(now_active);
+        let _ = self.mpris_player.set_shuffle(now_active);
         self.rebuild_playlist_view();
         None
     }
@@ -885,6 +1007,7 @@ impl Controller {
                 set_image(self.playmode_button.upcast_ref(),
                           &self.loop_icon,
                           fallback::LOOP);
+                self.mpris_player.set_loop_status(Playmode::End.into());
             },
             Some(playlist) => {
                 self.playmode_button.set_sensitive(true);
@@ -900,6 +1023,7 @@ impl Controller {
                               fallback::LOOP);
                 }
                 self.playmode_button.set_active(playmode != Playmode::End);
+                self.mpris_player.set_loop_status(playmode.into());
             }
         }
         None
@@ -1040,6 +1164,12 @@ impl Controller {
             .map(|x| x.write().unwrap()
                  .set_rule_code_and_columns(neu_code, neu_columns));
     }
+    fn hotkey_quit(&mut self) {
+        self.window.close();
+    }
+    fn hotkey_raise(&mut self) {
+        self.window.present();
+    }
     fn hotkey_playpause(&mut self) {
         self.clicked_play()
     }
@@ -1065,6 +1195,35 @@ impl Controller {
     }
     fn hotkey_mute(&mut self) {
         eprintln!("TODO: mute");
+    }
+    fn hotkey_set_volume(&mut self, nu: f64) {
+        self.volume_button.set_value(nu);
+        let nu = (nu.max(0.0).min(2.0) * 100.0 + 0.5).floor() as i32;
+        prefs::set_volume(nu);
+    }
+    fn hotkey_set_shuffle(&mut self, shuffle: bool) -> Option<()> {
+        let playlist_ref = self.active_playlist.as_ref()?;
+        let mut playlist = playlist_ref.write().unwrap();
+        if playlist.is_shuffled() != shuffle {
+            self.shuffle_button.set_active(shuffle);
+            playlist.set_shuffle(shuffle);
+            drop(playlist);
+            // this will result in borrowing the MprisPlayer again. let
+            // periodic handle this.
+            //self.rebuild_playlist_view();
+        }
+        None
+    }
+    fn hotkey_set_playmode(&mut self, nu: Playmode) -> Option<()> {
+        let playlist_ref = self.active_playlist.as_ref()?;
+        let mut playlist = playlist_ref.write().unwrap();
+        if playlist.get_playmode() != nu {
+            playlist.set_playmode(nu);
+            drop(playlist);
+            self.update_playmode_button();
+            self.rebuild_playlist_view();
+        }
+        None
     }
     fn hotkey_pause(&mut self) {
         playback::send_command(PlaybackCommand::Pause)

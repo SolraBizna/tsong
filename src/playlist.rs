@@ -14,12 +14,33 @@ use serde::{Serialize,Deserialize};
 use mlua::Lua;
 use lazy_static::lazy_static;
 use rand::prelude::*;
+use mpris_player::LoopStatus;
 
 pub type PlaylistRef = Reference<Playlist>;
 
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub enum Playmode {
     End, Loop, LoopOne
+}
+
+impl From<LoopStatus> for Playmode {
+    fn from(i: LoopStatus) -> Playmode {
+        match i {
+            LoopStatus::None => Playmode::End,
+            LoopStatus::Track => Playmode::LoopOne,
+            LoopStatus::Playlist => Playmode::Loop,
+        }
+    }
+}
+
+impl From<Playmode> for LoopStatus {
+    fn from(i: Playmode) -> LoopStatus {
+        match i {
+            Playmode::End => LoopStatus::None,
+            Playmode::LoopOne => LoopStatus::Track,
+            Playmode::Loop => LoopStatus::Playlist,
+        }
+    }
 }
 
 impl Playmode {
@@ -247,6 +268,13 @@ impl Playlist {
         db::update_playlist_shuffled(self.id, self.shuffled);
         self.resort();
         self.shuffled
+    }
+    pub fn set_shuffle(&mut self, shuffled: bool) {
+        if self.shuffled != shuffled {
+            self.shuffled = shuffled;
+            db::update_playlist_shuffled(self.id, self.shuffled);
+            self.resort();
+        }
     }
     /// Returns true if the playlist is shuffled, false if it is sorted.
     pub fn is_shuffled(&self) -> bool {
