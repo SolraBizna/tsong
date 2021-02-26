@@ -7,17 +7,21 @@ use gtk::{
     ApplicationWindow,
     BoxBuilder,
     Button, ButtonBuilder, ButtonBoxBuilder, ButtonBoxStyle,
+    ButtonsType,
     CellRendererText,
     Container,
+    DialogFlags,
     Entry, EntryBuilder,
     Grid, GridBuilder,
     IconLookupFlags, IconTheme,
     Image,
     Label, LabelBuilder,
     ListStore,
+    MessageDialog, MessageType,
     Orientation,
     Overlay,
     PolicyType,
+    ResponseType,
     ScrolledWindowBuilder,
     SeparatorBuilder,
     Spinner, SpinnerBuilder,
@@ -385,7 +389,17 @@ impl Controller {
                 .map(|mut x| x.clicked_new_playlist());
         });
         let controller = nu.clone();
+        let window = this.window.clone();
         this.delete_playlist_button.connect_clicked(move |_| {
+            let confirm = MessageDialog::new(Some(&window),
+                                             DialogFlags::MODAL,
+                                             MessageType::Warning,
+                                             ButtonsType::OkCancel,
+                                             "Are you sure you want to delete \
+                                              the selected playlist?");
+            let result = confirm.run();
+            confirm.close();
+            if result == ResponseType::Cancel { return }
             let _ = controller.try_borrow_mut()
                 .map(|mut x| x.clicked_delete_playlist());
         });
@@ -1210,9 +1224,6 @@ impl Controller {
     }
     fn clicked_delete_playlist(&mut self) -> Option<()> {
         if !self.delete_playlist_button_should_be_sensitive() { return None }
-        let _playlist = self.active_playlist.as_ref()?;
-        // TODO: If deleting one or more playlists with children, warn before
-        // proceeding
         let selection = self.playlists_view.get_selection();
         let (wo_list, model) = selection.get_selected_rows();
         let wo_list: Vec<TreeRowReference>
