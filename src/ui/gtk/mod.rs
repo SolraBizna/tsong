@@ -105,9 +105,9 @@ pub struct Controller {
     playlist_generation: GenerationValue,
     scan_spinner: Spinner,
     mpris_player: Arc<MprisPlayer>,
-    mpris_song: Option<LogicalSongRef>,
     mpris_time: i64,
     last_active_playlist: Option<(TreeIter,PlaylistRef)>,
+    last_active_song: Option<(Option<TreeIter>,LogicalSongRef)>,
     prev_icon: Option<Image>,
     play_icon: Option<Image>,
     pause_icon: Option<Image>,
@@ -302,8 +302,8 @@ impl Controller {
             new_playlist_button, delete_playlist_button,
             playlist_name_column, playlist_name_cell, window,
             playlist_edit_button,
-            mpris_player, mpris_time: 0, mpris_song: None,
-            last_active_playlist,
+            mpris_player, mpris_time: 0,
+            last_active_playlist, last_active_song: None,
             prev_icon: None, next_icon: None,
             play_icon: None, pause_icon: None,
             rollup_icon: None, rolldown_icon: None, settings_icon: None,
@@ -557,6 +557,8 @@ impl Controller {
             },
             _ => None,
         };
+        let active_song = playback::get_active_song();
+        let active_song = active_song.as_ref().map(|x| &x.0);
         self.last_built_playlist = self.active_playlist.clone();
         // destroy existing columns
         // TODO: figure out why the sort indicator disappears
@@ -575,7 +577,8 @@ impl Controller {
         tvc.set_sort_indicator(false);
         tvc.pack_start(&cell, true);
         tvc.set_alignment(1.0);
-        tvc.add_attribute(&cell, "text", 1);
+        tvc.add_attribute(&cell, "text", 2);
+        tvc.add_attribute(&cell, "weight", 1);
         self.playlist_view.append_column(&tvc);
         let playlist_ref = match self.active_playlist.as_ref() {
             Some(x) => x,
@@ -598,6 +601,7 @@ impl Controller {
         self.playlist_generation = playlist.get_playlist_generation();
         let mut types = Vec::with_capacity(playlist.get_columns().len() + 2);
         types.push(SONG_ID_TYPE); // Song ID
+        types.push(Type::U32); // Weight of text
         types.push(Type::U32); // Index in playlist
         for _ in playlist.get_columns() {
             types.push(Type::String); // Each metadata column...
@@ -608,7 +612,7 @@ impl Controller {
         let first_sort_by = playlist.get_sort_order().get(0);
          */
         let playlist_model = ListStore::new(&types[..]);
-        let mut column_index: u32 = 2;
+        let mut column_index: u32 = 3;
         for column in playlist.get_columns() {
             let tvc = TreeViewColumn::new();
             let cell = CellRendererText::new();
@@ -654,6 +658,7 @@ impl Controller {
                 // tvc.set_alignment(1.0);
             }
             tvc.add_attribute(&cell, "text", column_index as i32);
+            tvc.add_attribute(&cell, "weight", 1);
             // TODO: i18n this
             column_index += 1;
             self.playlist_view.append_column(&tvc);
@@ -664,19 +669,34 @@ impl Controller {
         let mut song_index = 1;
         let mut total_duration = 0u32;
         let mut place_to_put_cursor = None;
-        for song in playlist.get_songs() {
+        self.last_active_song = active_song.map(|x| {
+            (None, x.clone())
+        });
+        for song_ref in playlist.get_songs() {
             let new_row = playlist_model.append();
-            if Some(song) == song_to_select.as_ref() {
+            if Some(song_ref) == song_to_select.as_ref() {
                 place_to_put_cursor = playlist_model.get_path(&new_row);
             }
-            let song = song.read().unwrap();
+            let song = song_ref.read().unwrap();
             playlist_model.set_value(&new_row, 0,
                                      &song_id_to_value(song.get_id()));
-            playlist_model.set_value(&new_row, 1, &song_index.to_value());
+            let weight = if Some(song_ref) == active_song {
+                // this is a doozy
+                match &mut self.last_active_song {
+                    Some(x) => x.0 = Some(new_row.clone()),
+                    // can't be reached because active_song is non-None, and
+                    // therefore last_active_song got set to Some above
+                    _ => unreachable!(),
+                }
+                ACTIVE_WEIGHT
+            }
+            else { INACTIVE_WEIGHT };
+            playlist_model.set_value(&new_row, 1, &weight.to_value());
+            playlist_model.set_value(&new_row, 2, &song_index.to_value());
             song_index += 1;
             total_duration = total_duration.saturating_add(song.get_duration());
             let metadata = song.get_metadata();
-            let mut column_index: u32 = 2;
+            let mut column_index: u32 = 3;
             for column in playlist.get_columns() {
                 let s = if column.tag == "duration" {
                     pretty_duration(song.get_duration()).to_value()
@@ -884,8 +904,48 @@ impl Controller {
                 Some(song_ref)
             },
         };
-        if self.mpris_song != active_song {
-            self.mpris_song = active_song;
+        if self.last_active_song.as_ref().map(|x| &x.1)
+        != active_song.as_ref() {
+            let playlist_model = self.playlist_model.as_ref().unwrap();
+            match self.last_active_song.as_ref() {
+                Some((Some(iter), _)) => {
+                    playlist_model.set_value(&iter, 1,
+                                             &INACTIVE_WEIGHT.to_value());
+                },
+                _ => (),
+            }
+            self.last_active_song = active_song.as_ref().map(|x| {
+                (None, x.clone())
+            });
+            match active_song.as_ref() {
+                Some(neu_ref) => {
+                    // Do a linear search (ick!) for the correct row to
+                    // hilight.
+                    let search_id = neu_ref.read().unwrap().get_id();
+                    let mut neu_iter = None;
+                    playlist_model.foreach(|model, _, iter| -> bool {
+                        let found_id
+                            = value_to_song_id(model.get_value(&iter, 0));
+                        if found_id == Some(search_id) {
+                            model.downcast_ref::<ListStore>().unwrap()
+                                .set_value(&iter, 1,
+                                           &ACTIVE_WEIGHT.to_value());
+                            neu_iter = Some(iter.clone());
+                            true
+                        }
+                        else {
+                            false
+                        }
+                    });
+                    if let Some(neu_iter) = neu_iter {
+                        match &mut self.last_active_song {
+                            Some(x) => x.0 = Some(neu_iter),
+                            _ => (),
+                        }
+                    }
+                },
+                None => (),
+            }
             let mut mpris_metadata = mpris_player::Metadata {
                 length: None,
                 art_url: None,
@@ -899,7 +959,7 @@ impl Controller {
                 track_number: None,
                 url: None,
             };
-            if let Some(song_ref) = self.mpris_song.as_ref() {
+            if let Some(song_ref) = active_song.as_ref() {
                 let song = song_ref.read().unwrap();
                 mpris_metadata.length = Some(song.get_duration() as i64
                                              * 1000000);
