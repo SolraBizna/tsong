@@ -248,3 +248,9 @@ pub fn open_for_write(name: &str) -> anyhow::Result<Update> {
     backup_path.push(name.to_owned() + BACKUP_SUFFIX);
     Ok(Update { inner, neu_path, final_path, backup_path, finished: false })
 }
+
+/// Tries to create the configuration directory if it doesn't exist.
+pub fn try_create_config_dir() -> std::io::Result<()> {
+    let src = &CONFIG_PATHS[CONFIG_PATHS.len() - 1];
+    fs::create_dir_all(src)
+}

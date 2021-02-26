@@ -23,7 +23,13 @@ pub fn open_database() -> anyhow::Result<()> {
     let mut database_lock = DATABASE.lock().unwrap();
     assert!(database_lock.is_none());
     let db_path = config::get_config_file_path("Database.sqlite3");
-    let database = Connection::open(db_path)?;
+    let database = Connection::open(&db_path)
+        .map_err(anyhow::Error::new)
+        .or_else(|_| {
+            config::try_create_config_dir()?;
+            Connection::open(&db_path)
+                .map_err(anyhow::Error::new)
+        })?;
     let user_version = database.query_row
         ("SELECT user_version FROM pragma_user_version;", rusqlite::NO_PARAMS,
          |row| row.get(0));
