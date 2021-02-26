@@ -546,8 +546,8 @@ fn delete_playlist_from(victim_ref: &PlaylistRef,
 /// grandparents. Handles all child-related bookkeeping; you *do not* need to
 /// call `rebuild_children`!
 pub fn delete_playlist(victim_ref: PlaylistRef) {
-    let mut victim = victim_ref.write().unwrap();
     let playlists_by_id = PLAYLISTS_BY_ID.write().unwrap();
+    let mut victim = victim_ref.write().unwrap();
     match victim.parent_id.as_ref().and_then(|x| playlists_by_id.get(x)) {
         None => {
             // Orphan or top-level playlist.
