@@ -25,7 +25,7 @@ use gtk::{
     StyleContext,
     ToggleButton, ToggleButtonBuilder,
     ToolButton, ToolButtonBuilder,
-    TreeIter, TreePath, TreeStore, TreeRowReference,
+    TreeIter, TreePath, TreeStore, TreeRowReference, TreeModelFlags,
     TreeView, TreeViewBuilder, TreeViewColumn,
     VolumeButton, VolumeButtonBuilder,
     Widget,
@@ -55,6 +55,9 @@ use std::{
 
 mod settings;
 mod playlist_edit;
+
+const INACTIVE_WEIGHT: u32 = 400; // normal weight
+const ACTIVE_WEIGHT: u32 = 800; // bold
 
 /// Fallback labels for missing icons.
 mod fallback {
@@ -104,6 +107,7 @@ pub struct Controller {
     mpris_player: Arc<MprisPlayer>,
     mpris_song: Option<LogicalSongRef>,
     mpris_time: i64,
+    last_active_playlist: Option<(TreeIter,PlaylistRef)>,
     prev_icon: Option<Image>,
     play_icon: Option<Image>,
     pause_icon: Option<Image>,
@@ -272,13 +276,16 @@ impl Controller {
         scan_thread.rescan(prefs::get_music_paths())
             .expect("Couldn't start the initial music scan!");
         let playlist_model = None;
-        let (playlists_model, _) = build_playlists_model(&[]);
+        let (playlists_model, _, neu_active_playlist)
+            = build_playlists_model(&[]);
+        let last_active_playlist = neu_active_playlist;
         let playlist_name_column = TreeViewColumn::new();
         let playlist_name_cell = CellRendererText::new();
         playlist_name_cell.set_property("editable", &true)
             .expect("couldn't make playlist name cell editable");
         playlist_name_column.pack_start(&playlist_name_cell, true);
         playlist_name_column.add_attribute(&playlist_name_cell, "text", 1);
+        playlist_name_column.add_attribute(&playlist_name_cell, "weight", 2);
         // I'd love to do this in CSS...
         // (ignore errors because this is not critical to functionality)
         // (fun fact! if this is an f32 instead of an f64, it breaks!)
@@ -296,6 +303,7 @@ impl Controller {
             playlist_name_column, playlist_name_cell, window,
             playlist_edit_button,
             mpris_player, mpris_time: 0, mpris_song: None,
+            last_active_playlist,
             prev_icon: None, next_icon: None,
             play_icon: None, pause_icon: None,
             rollup_icon: None, rolldown_icon: None, settings_icon: None,
@@ -805,6 +813,44 @@ impl Controller {
         }
         self.periodic(true);
     }
+    fn change_future_playlist(&mut self, neu: Option<PlaylistRef>) {
+        match self.last_active_playlist.as_ref() {
+            Some((_, x)) if Some(x) == neu.as_ref() => { return },
+            Some((iter, _)) => {
+                self.playlists_model.set_value(&iter, 2,
+                                               &INACTIVE_WEIGHT.to_value());
+            },
+            None => (),
+        }
+        self.last_active_playlist = None;
+        match neu.as_ref() {
+            Some(neu_ref) => {
+                // Do a linear search (ick!) for the correct row to hilight.
+                let search_id = neu_ref.read().unwrap().get_id();
+                let mut neu_iter = None;
+                self.playlists_model.foreach(|model, _, iter| -> bool {
+                    let found_id
+                        = value_to_playlist_id(model.get_value(&iter, 0));
+                    if found_id == Some(search_id) {
+                        model.downcast_ref::<TreeStore>().unwrap()
+                            .set_value(&iter, 2, &ACTIVE_WEIGHT.to_value());
+                        neu_iter = Some(iter.clone());
+                        true
+                    }
+                    else {
+                        false
+                    }
+                });
+                if let Some(neu_iter) = neu_iter {
+                    self.last_active_playlist
+                        = Some((neu_iter, neu_ref.clone()));
+                }
+            },
+            None => (),
+        }
+        playback::set_future_playlist(neu);
+    }
+    
     fn update_view(&mut self) {
         let (status, active_song) = playback::get_status_and_active_song();
         if status.is_playing() {
@@ -930,7 +976,7 @@ impl Controller {
         }
         else {
             let song_to_play = if status == PlaybackStatus::Stopped {
-                playback::set_future_playlist(self.active_playlist.clone());
+                self.change_future_playlist(self.active_playlist.clone());
                 let playlist_model = self.playlist_model.as_ref().unwrap();
                 self.playlist_view.get_cursor().0
                     .and_then(|x| playlist_model.get_iter(&x))
@@ -978,7 +1024,7 @@ impl Controller {
             .and_then(value_to_song_id)
             .and_then(logical::get_song_by_song_id);
         if let Some(song) = song {
-            playback::set_future_playlist(self.active_playlist.clone());
+            self.change_future_playlist(self.active_playlist.clone());
             playback::send_command(PlaybackCommand::Play(Some(song)));
             self.force_periodic();
         }
@@ -1088,9 +1134,10 @@ impl Controller {
             }
             playlist::delete_playlist(playlist);
         }
-        let (neu_model, _) = build_playlists_model(&[]);
+        let (neu_model, _, neu_active_playlist) = build_playlists_model(&[]);
         self.playlists_model = neu_model;
         self.playlists_view.set_model(Some(&self.playlists_model));
+        self.last_active_playlist = neu_active_playlist;
         if self.active_playlist.is_none() {
             self.activate_playlist_by_path(&TreePath::new_first());
         }
@@ -1251,7 +1298,7 @@ impl Controller {
         }
         else {
             let song_to_play = if status == PlaybackStatus::Stopped {
-                playback::set_future_playlist(self.active_playlist.clone());
+                self.change_future_playlist(self.active_playlist.clone());
                 let playlist_model = self.playlist_model.as_ref().unwrap();
                 self.playlist_view.get_cursor().0
                     .and_then(|x| playlist_model.get_iter(&x))
@@ -1390,34 +1437,59 @@ fn add_playlists_to_model(playlists_model: &TreeStore,
                           selected_playlists: &[PlaylistRef],
                           selection_paths: &mut Vec<TreePath>,
                           parent_iterator: Option<&TreeIter>,
-                          children: &[PlaylistRef]) {
+                          children: &[PlaylistRef],
+                          active_playlist: Option<&PlaylistRef>)
+-> Option<(TreeIter,PlaylistRef)> {
+    let mut ret = None;
     for playlist_ref in children.iter() {
         let playlist = playlist_ref.read().unwrap();
         let id = playlist.get_id();
+        let weight: u32 =
+            if Some(playlist_ref) == active_playlist { ACTIVE_WEIGHT }
+            else { INACTIVE_WEIGHT };
         let iter
-            = playlists_model.insert_with_values(parent_iterator, None, &[0,1],
+            = playlists_model.insert_with_values(parent_iterator, None,
+                                                 &[0, 1, 2],
                                                  &[&playlist_id_to_value(id),
-                                                   &playlist.get_name()]);
+                                                   &playlist.get_name(),
+                                                   &weight]);
         if selected_playlists.contains(playlist_ref) {
             match playlists_model.get_path(&iter) {
                 Some(x) => selection_paths.push(x),
                 None => (),
             }
         }
-        add_playlists_to_model(playlists_model,
-                               selected_playlists,
-                               selection_paths,
-                               Some(&iter),
-                               playlist.get_children());
+        if Some(playlist_ref) == active_playlist {
+            ret = Some((iter.clone(), playlist_ref.clone()));
+        }
+        ret = ret.or(add_playlists_to_model(playlists_model,
+                                            selected_playlists,
+                                            selection_paths,
+                                            Some(&iter),
+                                            playlist.get_children(),
+                                            active_playlist));
     }
+    ret
 }
 
+/// Returns:
+///
+/// 1. The new `TreeStore` containing an up to date model of the playlists
+/// 2. The new list of paths within the `TreeStore` of selected playlists
+///    (excluding any playlists that weren't in the new model)
+/// 3. The iterator to the currently active playlist, and a reference to it
 fn build_playlists_model(selected_playlists: &[PlaylistRef])
--> (TreeStore, Vec<TreePath>) {
-    let playlists_model = TreeStore::new(&[PLAYLIST_ID_TYPE,Type::String]);
+-> (TreeStore, Vec<TreePath>, Option<(TreeIter,PlaylistRef)>) {
+    let active_playlist = playback::get_future_playlist();
+    let playlists_model = TreeStore::new(&[PLAYLIST_ID_TYPE,Type::String,
+                                           Type::U32]);
+    assert!(playlists_model.get_flags()
+            .contains(TreeModelFlags::ITERS_PERSIST));
     let mut selection_paths = Vec::with_capacity(selected_playlists.len());
-    add_playlists_to_model(&playlists_model, selected_playlists,
-                           &mut selection_paths, None,
-                           &playlist::get_top_level_playlists()[..]);
-    (playlists_model, selection_paths)
+    let neu_active_playlist =
+        add_playlists_to_model(&playlists_model, selected_playlists,
+                               &mut selection_paths, None,
+                               &playlist::get_top_level_playlists()[..],
+                               active_playlist.as_ref());
+    (playlists_model, selection_paths, neu_active_playlist)
 }

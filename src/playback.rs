@@ -156,6 +156,11 @@ pub fn set_future_playlist(new_playlist: Option<PlaylistRef>) {
     }
 }
 
+/// Gets the currently active playlist, if there is one.
+pub fn get_future_playlist() -> Option<PlaylistRef> {
+    STATE.lock().unwrap().future_playlist.as_ref().cloned()
+}
+
 /// Returns the current playback status.
 pub fn get_playback_status() -> PlaybackStatus {
     STATE.lock().unwrap().status
