@@ -326,6 +326,7 @@ impl Controller {
             .set_sensitive(this.delete_playlist_button_should_be_sensitive());
         this.reload_icons();
         this.playlists_view.append_column(&this.playlist_name_column);
+        this.reconnect_playlists_model();
         let controller = nu.clone();
         this.volume_button.connect_value_changed(move |_, value| {
             let _ = controller.try_borrow_mut()
@@ -870,7 +871,45 @@ impl Controller {
         }
         playback::set_future_playlist(neu);
     }
-    
+    fn reconnect_playlists_model(&mut self) -> Option<()> {
+        let controller = Weak::upgrade(self.me.as_ref().unwrap())?;
+        // NOT row-inserted, because that is called before the data is put in
+        // so we have no way of knowing which row it was! @_@
+        self.playlists_model.connect_row_changed(move |model, path, iter| {
+            let _ = controller.try_borrow_mut()
+                .map(|mut x| x.model_playlist_moved(model, path, iter));
+        });
+        None
+    }
+    fn model_playlist_moved(&mut self, model: &TreeStore, _path: &TreePath,
+                            iter: &TreeIter) -> Option<()> {
+        assert_eq!(&self.playlists_model, model);
+        let parent_iter = model.iter_parent(iter);
+        let sibling_iter = iter.clone();
+        let sibling_iter = if model.iter_next(&sibling_iter) {
+            Some(sibling_iter)
+        } else { None };
+        eprintln!("\n\n\nInserted!!!!!!!!!!!!!!!");
+        let id = value_to_playlist_id(model.get_value(&iter, 0))?;
+        eprintln!("id={:?}", id);
+        let fresh = playlist::get_playlist_by_id(id)?;
+        eprintln!("fresh={:?}", fresh);
+        let parent = parent_iter.and_then(|iter| {
+            value_to_playlist_id(model.get_value(&iter, 0))
+        }).and_then(playlist::get_playlist_by_id);
+        let sibling = sibling_iter.and_then(|iter| {
+            value_to_playlist_id(model.get_value(&iter, 0))
+        }).and_then(playlist::get_playlist_by_id);
+        eprintln!("   parent/sibling: {:?}, {:?}", parent, sibling);
+        // make sure all three playlists are unique
+        assert_ne!(Some(&fresh), parent.as_ref());
+        assert_ne!(Some(&fresh), sibling.as_ref());
+        if parent.is_some() && sibling.is_some() {
+            assert_ne!(parent, sibling);
+        }
+        fresh.move_next_to(parent, sibling);
+        None
+    }
     fn update_view(&mut self) {
         let (status, active_song) = playback::get_status_and_active_song();
         if status.is_playing() {
@@ -1197,6 +1236,7 @@ impl Controller {
         }
         let (neu_model, _, neu_active_playlist) = build_playlists_model(&[]);
         self.playlists_model = neu_model;
+        self.reconnect_playlists_model();
         self.playlists_view.set_model(Some(&self.playlists_model));
         self.last_active_playlist = neu_active_playlist;
         if self.active_playlist.is_none() {

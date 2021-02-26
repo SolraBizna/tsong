@@ -200,6 +200,16 @@ pub fn update_playlist_parent_order(id: PlaylistID, order: u64) {
                            params![order as i64, id.as_inner() as i64]));
 }
 
+pub fn update_playlist_parent_id(id: PlaylistID,
+                                 parent: Option<PlaylistID>) {
+    let lock = DATABASE.lock();
+    let database = lock.as_ref().unwrap().as_ref().unwrap().borrow_mut();
+    dbtry(database.execute("UPDATE Playlists SET parent_id = ? \
+                            WHERE id = ?;",
+                           params![parent.map(|x| x.as_inner() as i64),
+                                   id.as_inner() as i64]));
+}
+
 pub fn update_playlist_parent_id_and_order(id: PlaylistID,
                                            parent: Option<PlaylistID>,
                                            order: u64) {

@@ -628,6 +628,51 @@ impl PlaylistRef {
             }
         }
     }
+    /// Removes this playlist from its old place in the order, and move it to
+    /// be a child of the given playlist (or top-level), before the other given
+    /// playlist (or at the end).
+    pub fn move_next_to(&self, parent_ref: Option<PlaylistRef>,
+                        sibling_ref: Option<PlaylistRef>) {
+        eprintln!("move_next_to({:?}, {:?}, {:?})", self, parent_ref, sibling_ref);
+        // The borrow checker did not want this function to be easy to write...
+        let playlists_by_id = PLAYLISTS_BY_ID.write().unwrap();
+        let mut victim = self.write().unwrap();
+        let mut top_level_playlists = TOP_LEVEL_PLAYLISTS
+            .write().unwrap();
+        match victim.parent_id.as_ref()
+            .and_then(|x| playlists_by_id.get(x)) {
+                None => {
+                    // Orphan or top-level playlist.
+                    delete_playlist_from(&self, &mut victim,
+                                         &mut top_level_playlists);
+                },
+                Some(parent_ref) => {
+                    delete_playlist_from(&self, &mut victim,
+                                         &mut parent_ref.write().unwrap()
+                                         .children);
+                },
+        }
+        victim.parent_id = parent_ref.as_ref().map(|x| x.read().unwrap().get_id());
+        let mut parent = parent_ref.as_ref().map(|x| x.write().unwrap());
+        let children = match &mut parent {
+            Some(parent) => {
+                victim.parent_id = Some(parent.id);
+                &mut parent.children
+            },
+            None => {
+                victim.parent_id = None;
+                &mut top_level_playlists
+            },
+        };
+        eprintln!("new parent ID: {:?}", victim.parent_id);
+        db::update_playlist_parent_id(victim.id, victim.parent_id);
+        drop(victim);
+        let store_index = sibling_ref.and_then(|x| children.iter()
+                                               .position(|y| y == &x))
+            .unwrap_or_else(|| children.len());
+        children.insert(store_index, self.clone());
+        redo_parent_orders(&mut children[..]);
+    }
 }
 
 impl Debug for Playlist {
