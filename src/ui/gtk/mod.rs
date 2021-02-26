@@ -996,7 +996,6 @@ impl Controller {
         let playlist = self.active_playlist.as_ref()?;
         playlist.write().unwrap().bump_playmode();
         self.update_playmode_button();
-        self.rebuild_playlist_view();
         None
     }
     fn update_playmode_button(&mut self) -> Option<()> {
@@ -1239,7 +1238,6 @@ impl Controller {
             playlist.set_playmode(nu);
             drop(playlist);
             self.update_playmode_button();
-            self.rebuild_playlist_view();
         }
         None
     }
