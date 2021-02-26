@@ -1146,9 +1146,10 @@ impl Controller {
         let id = playlist.get_id();
         let playlists_model = &self.playlists_model;
         let wo = 
-            playlists_model.insert_with_values(None, None, &[0, 1],
+            playlists_model.insert_with_values(None, None, &[0, 1, 2],
                                                &[&playlist_id_to_value(id),
-                                                 &playlist.get_name()]);
+                                                 &playlist.get_name(),
+                                                 &INACTIVE_WEIGHT]);
         drop(playlist);
         match playlists_model.get_path(&wo) {
             Some(path) => {
