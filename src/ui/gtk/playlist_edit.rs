@@ -56,9 +56,6 @@ impl Controller {
         let window = WindowBuilder::new()
             .name("playlist_editor").type_(WindowType::Toplevel)
             .title("Tsong - Playlist Editor").build();
-        window.connect_delete_event(move |window, _| {
-            window.hide_on_delete()
-        });
         let big_box = BoxBuilder::new()
             .name("playlist_editor").orientation(Orientation::Vertical)
             .spacing(4).build();
@@ -213,14 +210,19 @@ impl Controller {
     }
     fn clicked_cancel(&mut self) {
         self.window.close();
+        self.cleanup();
     }
     fn clicked_ok(&mut self) {
         self.clicked_apply();
         self.window.close();
+        self.cleanup();
     }
-    fn cleanup(&mut self) {
+    fn cleanup(&mut self) -> Option<()> {
         self.columns_model.clear();
         self.playlist_code.set_text("");
+        let parent = self.parent.upgrade()?;
+        parent.try_borrow_mut().ok()?.closed_playlist_edit();
+        None
     }
     pub fn show(&mut self) {
         if !self.window.is_visible() {
@@ -231,13 +233,16 @@ impl Controller {
             self.window.present();
         }
     }
+    pub fn unshow(&mut self) {
+        self.window.close();
+        self.cleanup();
+    }
     pub fn activate_playlist(&mut self, playlist: Option<PlaylistRef>) {
         self.active_playlist = playlist;
         if !self.window.is_visible() { return }
         self.populate();
     }
     fn populate(&mut self) {
-        self.cleanup();
         let playlist = match self.active_playlist.as_ref() {
             Some(x) => x,
             None => return,

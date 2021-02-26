@@ -98,11 +98,11 @@ pub struct Controller {
     playlists_model: TreeStore,
     playlists_view: TreeView,
     playmode_button: ToggleButton,
-    playlist_edit_button: Button,
+    playlist_edit_button: ToggleButton,
     prev_button: Button,
     rollup_button: Button,
     rollup_grid: Grid,
-    settings_button: Button,
+    settings_button: ToggleButton,
     shuffle_button: ToggleButton,
     volume_button: VolumeButton,
     window: ApplicationWindow,
@@ -169,7 +169,7 @@ impl Controller {
             .expand(true).build();
         // So, the playback controls...
         // Button to bring up the settings window:
-        let settings_button = ButtonBuilder::new()
+        let settings_button = ToggleButtonBuilder::new()
             .name("settings").build();
         control_button_add(&control_box, &settings_button, &["popup"]);
         // Button to go back to the previous song in the playlist:
@@ -250,7 +250,7 @@ impl Controller {
             .build();
         playlist_control_box.pack_start(&playlist_name, true, true, 0);
         // Button to edit playlist settings:
-        let playlist_edit_button = ButtonBuilder::new()
+        let playlist_edit_button = ToggleButtonBuilder::new()
             .name("edit_playlist").label("Edit").build();
         playlist_control_box.pack_end(&playlist_edit_button, false, false, 0);
         playlist_itself_box.add(&playlist_control_box);
@@ -762,7 +762,7 @@ impl Controller {
         self.loop_icon = get_icon(&color, "tsong-loop");
         self.loop_one_icon = get_icon(&color, "tsong-loop-one");
         self.settings_icon = get_icon(&color, "tsong-settings");
-        set_image(&self.settings_button, &self.settings_icon,
+        set_image(self.settings_button.upcast_ref(), &self.settings_icon,
                   fallback::SETTINGS);
         set_image(&self.prev_button, &self.prev_icon, fallback::PREV);
         set_image(&self.next_button, &self.next_icon, fallback::NEXT);
@@ -1296,14 +1296,32 @@ impl Controller {
         }
     }
     fn clicked_settings(&mut self) -> Option<()> {
-        self.settings_controller.as_ref().unwrap().try_borrow_mut().ok()?
-            .show();
+        if self.settings_button.get_active() {
+            self.settings_controller.as_ref().unwrap().try_borrow_mut().ok()?
+                .show();
+        }
+        else {
+            self.settings_controller.as_ref().unwrap().try_borrow_mut().ok()?
+                .unshow();
+        }
         None
     }
+    fn closed_settings(&mut self) {
+        self.settings_button.set_active(false);
+    }
     fn clicked_playlist_edit(&mut self) -> Option<()> {
-        self.playlist_edit_controller.as_ref().unwrap().try_borrow_mut().ok()?
-            .show();
+        if self.playlist_edit_button.get_active() {
+            self.playlist_edit_controller.as_ref().unwrap().try_borrow_mut()
+                .ok()?.show();
+        }
+        else {
+            self.playlist_edit_controller.as_ref().unwrap().try_borrow_mut()
+                .ok()?.unshow();
+        }
         None
+    }
+    fn closed_playlist_edit(&mut self) {
+        self.playlist_edit_button.set_active(false);
     }
     fn rescan(&mut self) {
         match self.scan_thread.rescan(prefs::get_music_paths()) {

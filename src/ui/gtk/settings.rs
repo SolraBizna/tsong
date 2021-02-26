@@ -322,6 +322,7 @@ impl Controller {
     }
     fn clicked_cancel(&mut self) {
         self.window.close();
+        self.cleanup();
     }
     fn clicked_ok(&mut self) {
         self.clicked_apply();
@@ -334,6 +335,7 @@ impl Controller {
             },
         }
         self.window.close();
+        self.cleanup();
     }
     fn clicked_delete_location(&mut self) -> Option<()> {
         let wo = self.locations_view.get_cursor().0?;
@@ -364,10 +366,13 @@ impl Controller {
         self.locations_model.insert_with_values(None, &[0], &[&path]);
         None
     }
-    fn cleanup(&mut self) {
+    fn cleanup(&mut self) -> Option<()> {
         self.locations_model.clear();
         self.audiodev_model.clear();
         self.hostapi_model.clear();
+        let parent = self.parent.upgrade()?;
+        parent.try_borrow_mut().ok()?.closed_settings();
+        None
     }
     pub fn show(&mut self) {
         if !self.window.is_visible() {
@@ -378,5 +383,9 @@ impl Controller {
         else {
             self.window.present();
         }
+    }
+    pub fn unshow(&mut self) {
+        self.window.close();
+        self.cleanup();
     }
 }
