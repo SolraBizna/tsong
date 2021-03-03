@@ -134,8 +134,14 @@ pub struct Controller {
 fn set_image(button: &Button, icon: &Option<Image>, fallback: &str) {
     button.set_image(icon.as_ref());
     match icon {
-        Some(_) => button.set_label(""),
-        None => button.set_label(fallback),
+        Some(_) => {
+            button.set_label("");
+            let _ = button.set_property("always-show-image", &true);
+        },
+        None => {
+            button.set_label(fallback);
+            let _ = button.set_property("always-show-image", &false);
+        },
     }
 }
 
