@@ -47,14 +47,9 @@ use glib::{
     Value,
 };
 use gio::prelude::*;
-use mpris_player::{
-    MprisPlayer,
-    OrgMprisMediaPlayer2Player,
-};
 use std::{
     cell::RefCell,
     rc::{Rc,Weak},
-    sync::Arc,
 };
 
 mod settings;
@@ -108,8 +103,8 @@ pub struct Controller {
     window: ApplicationWindow,
     playlist_generation: GenerationValue,
     scan_spinner: Spinner,
-    mpris_player: Arc<MprisPlayer>,
-    mpris_time: i64,
+    remote: Option<Remote>,
+    remote_time: f64,
     last_active_playlist: Option<(TreeIter,PlaylistRef)>,
     last_active_song: Option<(Option<TreeIter>,LogicalSongRef)>,
     prev_icon: Option<Image>,
@@ -300,9 +295,6 @@ impl Controller {
         // (ignore errors because this is not critical to functionality)
         // (fun fact! if this is an f32 instead of an f64, it breaks!)
         let _ = playlist_name_cell.set_property("scale", &0.80);
-        let mpris_player = MprisPlayer::new("tsong".to_owned(),
-                                            "Tsong".to_owned(),
-                                            "tsong".to_owned());
         let nu = Rc::new(RefCell::new(Controller {
             rollup_button, settings_button, prev_button, next_button,
             shuffle_button, playmode_button, play_button, volume_button,
@@ -312,7 +304,7 @@ impl Controller {
             new_playlist_button, delete_playlist_button,
             playlist_name_column, playlist_name_cell, window,
             playlist_edit_button,
-            mpris_player, mpris_time: 0,
+            remote: None, remote_time: -1.0,
             last_active_playlist, last_active_song: None,
             prev_icon: None, next_icon: None,
             play_icon: None, pause_icon: None,
@@ -332,6 +324,7 @@ impl Controller {
         this.me = Some(Rc::downgrade(&nu));
         this.settings_controller = Some(settings::Controller::new(Rc::downgrade(&nu)));
         this.playlist_edit_controller = Some(playlist_edit::Controller::new(Rc::downgrade(&nu)));
+        this.remote = Some(Remote::new(Rc::downgrade(&nu)));
         this.delete_playlist_button
             .set_sensitive(this.delete_playlist_button_should_be_sensitive());
         this.reload_icons();
@@ -433,69 +426,69 @@ impl Controller {
                 match keyval {
                     key::space => {
                         let _ = controller.try_borrow_mut()
-                            .map(|mut x| x.hotkey_playpause());
+                            .map(|mut x| x.remote_playpause());
                         return Inhibit(true)
                     },
                     key::Left => {
                         let _ = controller.try_borrow_mut()
-                            .map(|mut x| x.hotkey_left());
+                            .map(|mut x| x.remote_left());
                         return Inhibit(true)
                     },
                     key::Right => {
                         let _ = controller.try_borrow_mut()
-                            .map(|mut x| x.hotkey_right());
+                            .map(|mut x| x.remote_right());
                         return Inhibit(true)
                     },
                     // TODO: handle AudioForward and AudioRewind in another way
                     key::AudioCycleTrack | key::AudioForward
                     | key::AudioNext => {
                         let _ = controller.try_borrow_mut()
-                            .map(|mut x| x.hotkey_next());
+                            .map(|mut x| x.remote_next());
                         return Inhibit(true)
                     },
                     key::AudioRewind | key::AudioPrev => {
                         let _ = controller.try_borrow_mut()
-                            .map(|mut x| x.hotkey_prev());
+                            .map(|mut x| x.remote_prev());
                         return Inhibit(true)
                     },
                     key::AudioLowerVolume => {
                         let _ = controller.try_borrow_mut()
-                            .map(|mut x| x.hotkey_quieten());
+                            .map(|mut x| x.remote_quieten());
                         return Inhibit(true)
                     },
                     key::AudioRaiseVolume => {
                         let _ = controller.try_borrow_mut()
-                            .map(|mut x| x.hotkey_louden());
+                            .map(|mut x| x.remote_louden());
                         return Inhibit(true)
                     },
                     key::AudioMute => {
                         let _ = controller.try_borrow_mut()
-                            .map(|mut x| x.hotkey_mute());
+                            .map(|mut x| x.remote_mute());
                         return Inhibit(true)
                     },
                     key::AudioPause => {
                         let _ = controller.try_borrow_mut()
-                            .map(|mut x| x.hotkey_pause());
+                            .map(|mut x| x.remote_pause());
                         return Inhibit(true)
                     },
                     key::AudioPlay => {
                         let _ = controller.try_borrow_mut()
-                            .map(|mut x| x.hotkey_play());
+                            .map(|mut x| x.remote_play());
                         return Inhibit(true)
                     },
                     key::AudioStop => {
                         let _ = controller.try_borrow_mut()
-                            .map(|mut x| x.hotkey_stop());
+                            .map(|mut x| x.remote_stop());
                         return Inhibit(true)
                     },
                     key::AudioRandomPlay => {
                         let _ = controller.try_borrow_mut()
-                            .map(|mut x| x.hotkey_shuffle());
+                            .map(|mut x| x.remote_shuffle());
                         return Inhibit(true)
                     },
                     key::AudioRepeat => {
                         let _ = controller.try_borrow_mut()
-                            .map(|mut x| x.hotkey_playmode());
+                            .map(|mut x| x.remote_playmode());
                         return Inhibit(true)
                     },
                     _ => ()
@@ -503,61 +496,6 @@ impl Controller {
             }
             return Inhibit(false)
         });
-        let controller = nu.clone();
-        this.mpris_player.set_can_quit(true);
-        this.mpris_player.connect_quit(move || {
-            let _ = controller.try_borrow_mut()
-                .map(|mut x| x.hotkey_quit());
-        });
-        let controller = nu.clone();
-        this.mpris_player.set_can_raise(true);
-        this.mpris_player.connect_raise(move || {
-            let _ = controller.try_borrow_mut()
-                .map(|mut x| x.hotkey_raise());
-        });
-        let controller = nu.clone();
-        this.mpris_player.set_can_go_next(true);
-        this.mpris_player.connect_next(move || {
-            let _ = controller.try_borrow_mut()
-                .map(|mut x| x.hotkey_next());
-        });
-        let controller = nu.clone();
-        this.mpris_player.set_can_go_previous(true);
-        this.mpris_player.connect_previous(move || {
-            let _ = controller.try_borrow_mut()
-                .map(|mut x| x.hotkey_prev());
-        });
-        let controller = nu.clone();
-        this.mpris_player.set_can_play(true);
-        this.mpris_player.connect_play(move || {
-            let _ = controller.try_borrow_mut()
-                .map(|mut x| x.hotkey_play());
-        });
-        let controller = nu.clone();
-        this.mpris_player.set_can_pause(true);
-        this.mpris_player.connect_pause(move || {
-            let _ = controller.try_borrow_mut()
-                .map(|mut x| x.hotkey_pause());
-        });
-        // TODO: seek
-        //let controller = nu.clone();
-        //this.mpris_player.set_can_seek(true);
-        let controller = nu.clone();
-        this.mpris_player.connect_volume(move |nu| {
-            let _ = controller.try_borrow_mut()
-                .map(|mut x| x.hotkey_set_volume(nu));
-        });
-        let controller = nu.clone();
-        this.mpris_player.connect_shuffle(move |nu| {
-            let _ = controller.try_borrow_mut()
-                .map(|mut x| x.hotkey_set_shuffle(nu));
-        });
-        let controller = nu.clone();
-        this.mpris_player.connect_loop_status(move |nu| {
-            let _ = controller.try_borrow_mut()
-                .map(|mut x| x.hotkey_set_playmode(nu.into()));
-        });
-        this.mpris_player.set_can_control(true);
         this.activate_playlist_by_path(&TreePath::new_first());
         this.force_periodic();
         // okay, show the window and away we go
@@ -609,7 +547,7 @@ impl Controller {
                 self.playlist_generation.destroy();
                 self.shuffle_button.set_sensitive(false);
                 self.shuffle_button.set_active(false);
-                let _ = self.mpris_player.set_shuffle(false);
+                let _ = self.remote.as_ref().unwrap().set_is_shuffled(false);
                 self.update_playmode_button();
                 return
             },
@@ -618,7 +556,7 @@ impl Controller {
         self.shuffle_button.set_sensitive(true);
         let is_shuffled = playlist.is_shuffled();
         self.shuffle_button.set_active(is_shuffled);
-        let _ = self.mpris_player.set_shuffle(is_shuffled);
+        let _ = self.remote.as_ref().unwrap().set_is_shuffled(is_shuffled);
         self.playlist_generation = playlist.get_playlist_generation();
         let mut types = Vec::with_capacity(playlist.get_columns().len() + 2);
         types.push(SONG_ID_TYPE); // Song ID
@@ -946,10 +884,9 @@ impl Controller {
             Some((song_ref, time)) => {
                 let song = song_ref.read().unwrap();
                 let metadata = song.get_metadata();
-                let mpris_time = (time * 1000000.0).floor() as i64;
-                if self.mpris_time != mpris_time {
-                    self.mpris_time = mpris_time;
-                    self.mpris_player.set_position(mpris_time);
+                if self.remote_time != time {
+                    self.remote_time = time;
+                    self.remote.as_ref().unwrap().set_play_pos(time);
                 }
                 self.osd.set_label
                     (&format!("{} - {}\n{} / {}",
@@ -1005,43 +942,9 @@ impl Controller {
                 },
                 None => (),
             }
-            let mut mpris_metadata = mpris_player::Metadata {
-                length: None,
-                art_url: None,
-                album: None,
-                album_artist: None,
-                artist: None,
-                composer: None,
-                disc_number: None,
-                genre: None,
-                title: None,
-                track_number: None,
-                url: None,
-            };
-            if let Some(song_ref) = active_song.as_ref() {
-                let song = song_ref.read().unwrap();
-                mpris_metadata.length = Some(song.get_duration() as i64
-                                             * 1000000);
-                let song_metadata = song.get_metadata();
-                mpris_metadata.album = song_metadata.get("album")
-                    .map(|x| x.to_owned());
-                mpris_metadata.artist = song_metadata.get("artist")
-                    .map(|x| vec![x.to_owned()]);
-                mpris_metadata.composer = song_metadata.get("composer")
-                    .map(|x| vec![x.to_owned()]);
-                mpris_metadata.genre = song_metadata.get("genre")
-                    .map(|x| vec![x.to_owned()]);
-                mpris_metadata.title = song_metadata.get("title")
-                    .map(|x| x.to_owned());
-                // TODO: parse until first slash, skip spaces
-                mpris_metadata.track_number = song_metadata.get("track#")
-                    .and_then(|x| x.parse().ok());
-                mpris_metadata.disc_number = song_metadata.get("disc#")
-                    .and_then(|x| x.parse().ok());
-            }
-            // TODO: update mpris metadata if we edit the song's metadata while
-            // it's playing
-            self.mpris_player.set_metadata(mpris_metadata);
+            // TODO: also do this if we edit the song's metadata while it's
+            // playing
+            self.remote.as_ref().unwrap().set_now_playing(active_song.as_ref());
         }
     }
     fn update_scan_status(&mut self) {
@@ -1153,7 +1056,7 @@ impl Controller {
         let playlist = self.active_playlist.as_ref()?;
         let now_active = playlist.write().unwrap().toggle_shuffle();
         self.shuffle_button.set_active(now_active);
-        let _ = self.mpris_player.set_shuffle(now_active);
+        let _ = self.remote.as_ref().unwrap().set_is_shuffled(now_active);
         self.rebuild_playlist_view();
         None
     }
@@ -1171,7 +1074,7 @@ impl Controller {
                 set_image(self.playmode_button.upcast_ref(),
                           &self.loop_icon,
                           fallback::LOOP);
-                self.mpris_player.set_loop_status(Playmode::End.into());
+                self.remote.as_ref().unwrap().set_cur_playmode(Playmode::End.into());
             },
             Some(playlist) => {
                 self.playmode_button.set_sensitive(true);
@@ -1187,7 +1090,7 @@ impl Controller {
                               fallback::LOOP);
                 }
                 self.playmode_button.set_active(playmode != Playmode::End);
-                self.mpris_player.set_loop_status(playmode.into());
+                self.remote.as_ref().unwrap().set_cur_playmode(playmode.into());
             }
         }
         None
@@ -1346,46 +1249,56 @@ impl Controller {
             .map(|x| x.write().unwrap()
                  .set_rule_code_and_columns(neu_code, neu_columns));
     }
-    fn hotkey_quit(&mut self) {
+}
+
+impl RemoteTarget for Controller {
+    fn remote_quit(&mut self) -> Option<()> {
         self.window.close();
+        None
     }
-    fn hotkey_raise(&mut self) {
+    fn remote_raise(&mut self) -> Option<()> {
         self.window.present();
+        None
     }
-    fn hotkey_playpause(&mut self) {
-        self.clicked_play()
+    fn remote_playpause(&mut self) -> Option<()> {
+        self.clicked_play();
+        None
     }
-    fn hotkey_left(&mut self) {
+    fn remote_left(&mut self) -> Option<()> {
         // TODO: RTL
-        self.hotkey_prev()
+        self.remote_prev()
     }
-    fn hotkey_right(&mut self) {
+    fn remote_right(&mut self) -> Option<()> {
         // TODO: RTL
-        self.hotkey_next()
+        self.remote_next()
     }
-    fn hotkey_prev(&mut self) {
-        playback::send_command(PlaybackCommand::Prev)
+    fn remote_prev(&mut self) -> Option<()> {
+        playback::send_command(PlaybackCommand::Prev);
+        None
     }
-    fn hotkey_next(&mut self) {
-        playback::send_command(PlaybackCommand::Next)
+    fn remote_next(&mut self) -> Option<()> {
+        playback::send_command(PlaybackCommand::Next);
+        None
     }
-    fn hotkey_quieten(&mut self) {
+    fn remote_quieten(&mut self) -> Option<()> {
         let cur_volume = prefs::get_volume();
         let nu_volume = (cur_volume - 5).max(prefs::MIN_VOLUME);
-        if cur_volume == nu_volume { return }
+        if cur_volume == nu_volume { return None }
         self.volume_button.set_value(nu_volume as f64 / 100.0);
         prefs::set_volume(nu_volume);
         self.volume_changed = true;
+        None
     }
-    fn hotkey_louden(&mut self) {
+    fn remote_louden(&mut self) -> Option<()> {
         let cur_volume = prefs::get_volume();
         let nu_volume = (cur_volume + 5).max(prefs::MAX_VOLUME);
-        if cur_volume == nu_volume { return }
+        if cur_volume == nu_volume { return None }
         self.volume_button.set_value(nu_volume as f64 / 100.0);
         prefs::set_volume(nu_volume);
         self.volume_changed = true;
+        None
     }
-    fn hotkey_mute(&mut self) {
+    fn remote_mute(&mut self) -> Option<()> {
         if playback::toggle_mute() {
             // we are now muted
             self.volume_button.set_value(0.0);
@@ -1394,14 +1307,16 @@ impl Controller {
             // we are no longer muted
             self.volume_button.set_value(prefs::get_volume() as f64 / 100.0);
         }
+        None
     }
-    fn hotkey_set_volume(&mut self, nu: f64) {
+    fn remote_set_volume(&mut self, nu: f64) -> Option<()> {
         self.volume_button.set_value(nu);
         let nu = (nu.max(0.0).min(2.0) * 100.0 + 0.5).floor() as i32;
         prefs::set_volume(nu);
         self.volume_changed = true;
+        None
     }
-    fn hotkey_set_shuffle(&mut self, shuffle: bool) -> Option<()> {
+    fn remote_set_shuffle(&mut self, shuffle: bool) -> Option<()> {
         let playlist_ref = self.active_playlist.as_ref()?;
         let mut playlist = playlist_ref.write().unwrap();
         if playlist.is_shuffled() != shuffle {
@@ -1414,7 +1329,7 @@ impl Controller {
         }
         None
     }
-    fn hotkey_set_playmode(&mut self, nu: Playmode) -> Option<()> {
+    fn remote_set_playmode(&mut self, nu: Playmode) -> Option<()> {
         let playlist_ref = self.active_playlist.as_ref()?;
         let mut playlist = playlist_ref.write().unwrap();
         if playlist.get_playmode() != nu {
@@ -1424,10 +1339,11 @@ impl Controller {
         }
         None
     }
-    fn hotkey_pause(&mut self) {
-        playback::send_command(PlaybackCommand::Pause)
+    fn remote_pause(&mut self) -> Option<()> {
+        playback::send_command(PlaybackCommand::Pause);
+        None
     }
-    fn hotkey_play(&mut self) {
+    fn remote_play(&mut self) -> Option<()> {
         let status = playback::get_playback_status();
         if status.is_playing() {
             // unlike when PlayPause is clicked, do nothing
@@ -1446,15 +1362,19 @@ impl Controller {
             set_image(&self.play_button, &self.pause_icon, fallback::PAUSE);
             self.force_periodic();
         }
+        None
     }
-    fn hotkey_stop(&mut self) {
-        playback::send_command(PlaybackCommand::Stop)
+    fn remote_stop(&mut self) -> Option<()> {
+        playback::send_command(PlaybackCommand::Stop);
+        None
     }
-    fn hotkey_shuffle(&mut self) {
+    fn remote_shuffle(&mut self) -> Option<()> {
         self.clicked_shuffle();
+        None
     }
-    fn hotkey_playmode(&mut self) {
+    fn remote_playmode(&mut self) -> Option<()> {
         self.clicked_playmode();
+        None
     }
 }
 

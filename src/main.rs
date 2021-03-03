@@ -10,6 +10,7 @@ pub mod reference;
 pub mod scan;
 pub mod db;
 pub mod ui;
+pub mod remote;
 
 pub use reference::Reference;
 pub use generation::{GenerationTracker, GenerationValue, NOT_GENERATED};
@@ -17,6 +18,7 @@ pub use physical::{PhysicalFile, PhysicalFileRef, FileID};
 pub use logical::{LogicalSong, LogicalSongRef, SongID};
 pub use playlist::{Playlist, PlaylistRef, PlaylistID, Playmode};
 pub use playback::{PlaybackCommand, PlaybackStatus};
+pub use remote::{Remote, RemoteTarget};
 pub use scan::ScanThread;
 
 fn main() {

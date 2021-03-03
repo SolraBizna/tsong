@@ -14,7 +14,6 @@ use serde::{Serialize,Deserialize};
 use mlua::Lua;
 use lazy_static::lazy_static;
 use rand::prelude::*;
-use mpris_player::LoopStatus;
 
 pub type PlaylistRef = Reference<Playlist>;
 
@@ -23,22 +22,24 @@ pub enum Playmode {
     End, Loop, LoopOne
 }
 
-impl From<LoopStatus> for Playmode {
-    fn from(i: LoopStatus) -> Playmode {
+#[cfg(feature="mpris")]
+impl From<mpris_player::LoopStatus> for Playmode {
+    fn from(i: mpris_player::LoopStatus) -> Playmode {
         match i {
-            LoopStatus::None => Playmode::End,
-            LoopStatus::Track => Playmode::LoopOne,
-            LoopStatus::Playlist => Playmode::Loop,
+            mpris_player::LoopStatus::None => Playmode::End,
+            mpris_player::LoopStatus::Track => Playmode::LoopOne,
+            mpris_player::LoopStatus::Playlist => Playmode::Loop,
         }
     }
 }
 
-impl From<Playmode> for LoopStatus {
-    fn from(i: Playmode) -> LoopStatus {
+#[cfg(feature="mpris")]
+impl From<Playmode> for mpris_player::LoopStatus {
+    fn from(i: Playmode) -> mpris_player::LoopStatus {
         match i {
-            Playmode::End => LoopStatus::None,
-            Playmode::LoopOne => LoopStatus::Track,
-            Playmode::Loop => LoopStatus::Playlist,
+            Playmode::End => mpris_player::LoopStatus::None,
+            Playmode::LoopOne => mpris_player::LoopStatus::Track,
+            Playmode::Loop => mpris_player::LoopStatus::Playlist,
         }
     }
 }
