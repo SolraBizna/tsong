@@ -23,6 +23,7 @@ use gtk::{
     PolicyType,
     ResponseType,
     ScrolledWindowBuilder,
+    SelectionMode,
     SeparatorBuilder,
     Spinner, SpinnerBuilder,
     StateFlags,
@@ -263,6 +264,7 @@ impl Controller {
             .build();
         let playlist_view = TreeViewBuilder::new().expand(true)
             .headers_visible(true).build();
+        playlist_view.get_selection().set_mode(SelectionMode::Multiple);
         playlist_window.add(&playlist_view);
         playlist_itself_box.add(&playlist_window);
         rollup_grid.attach(&playlist_itself_box, 2, 0, 1, 1);
