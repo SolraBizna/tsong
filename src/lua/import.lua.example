@@ -1,8 +1,10 @@
+-- -*- lua -*-
+--
 -- This Lua 5.4 script is applied to any songs that are newly imported into
 -- your library. It controls how raw, format-dependent metadata is mapped to
--- the metadata Tsong uses. You can edit this freely. If you screw it up too
--- badly, just delete the file and Tsong will put the default script in its
--- place the next time you start it up.
+-- the metadata Tsong uses. Rename this to "import.lua" and you can edit it
+-- freely. If you screw it up too badly, just delete the file and Tsong will go
+-- on its merry way.
 --
 -- For more information about the Lua scripting language and its syntax, see:
 -- <https://www.lua.org/manual/5.4/>

@@ -414,7 +414,7 @@ thread_local! {
 }
 
 const IMPORT_LIB: &[u8] = include_bytes!("lua/importlib.lua");
-const DEFAULT_IMPORT_SCRIPT: &[u8] = include_bytes!("lua/default_import.lua");
+const DEFAULT_IMPORT_SCRIPT: &[u8] = include_bytes!("lua/import.lua.example");
 const IMPORT_FUNC_KEY: &[u8] = b"Tsong Metadata Import Script";
 
 fn try_get_import_script() -> anyhow::Result<Option<Vec<u8>>> {
@@ -424,9 +424,6 @@ fn try_get_import_script() -> anyhow::Result<Option<Vec<u8>>> {
         Ok(Some(ret))
     }
     else {
-        let mut f = config::open_for_write("import.lua")?;
-        f.write_all(DEFAULT_IMPORT_SCRIPT)?;
-        f.finish()?;
         Ok(None)
     }
 }
@@ -535,4 +532,21 @@ impl LogicalSong {
             Err(x) => Err(anyhow!("{}", x)),
         }
     }
+}
+
+/// Checks to see if `import.lua.example` needs to be created or updated. Call
+/// once, on startup. Maybe even spawn it into a thread!
+pub fn maybe_write_example_import_script() -> Option<()> {
+    if let Ok(Some(mut f)) = config::open_best_for_read("import.lua.example") {
+        let mut buf = Vec::new();
+        if let Ok(_) = f.read_to_end(&mut buf) {
+            if buf == DEFAULT_IMPORT_SCRIPT {
+                return None
+            }
+        }
+    }
+    let mut f = config::open_for_write("import.lua.example").ok()?;
+    f.write_all(DEFAULT_IMPORT_SCRIPT).ok()?;
+    f.finish().ok()?;
+    None
 }

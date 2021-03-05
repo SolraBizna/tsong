@@ -22,6 +22,9 @@ pub use remote::{Remote, RemoteTarget};
 pub use scan::ScanThread;
 
 fn main() {
+    std::thread::spawn(|| {
+        logical::maybe_write_example_import_script()
+    });
     prefs::read().unwrap();
     db::open_database().unwrap();
     ffmpeg::init();
