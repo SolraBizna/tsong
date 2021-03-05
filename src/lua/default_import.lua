@@ -154,7 +154,7 @@ if not outmeta.title then
    filename = filename:gsub("^ +",""):gsub(" +$","")
    -- Try to extract a track number, while we're at it
    if not outmeta["track#"] then
-      local number, rest = filename:match("^0*([0-9]+)[_ ]+(.*)$")
+      local number, rest = filename:match("^0*([0-9]+)[-_ .]+(.+)$")
       if number then
          outmeta["track#"] = number
          filename = rest
