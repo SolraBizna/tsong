@@ -3,6 +3,8 @@
 //! It corresponds to the `logical_songs` table of the database.
 
 use crate::*;
+
+use anyhow::anyhow;
 use lazy_static::lazy_static;
 use mlua::{Lua, Function, Table};
 
@@ -218,7 +220,21 @@ pub fn incorporate_physical(file_ref: PhysicalFileRef) {
             similarity_recs: vec![similarity_rec.clone()],
         });
         let mut new_song = new_song_ref.write().unwrap();
-        new_song.import_metadata(&file);
+        if let Err(x) = new_song.import_metadata(&file) {
+            // TODO: error reporting, better
+            eprintln!("Error while importing metadata for song on initial \
+                       scan:\n{}\nFalling back to simple import.\n",
+                      x);
+            let mut new_metadata = BTreeMap::new();
+            for (k, v) in file.get_raw_metadata().iter() {
+                match k.as_str() {
+                    "artist" | "album" | "title"
+                        => new_metadata.insert(k.clone(), v.clone()),
+                    x => new_metadata.insert("raw_".to_owned() + x, v.clone()),
+                };
+            }
+            new_song.user_metadata = new_metadata;
+        }
         let song_id = db::add_song(&new_song.user_metadata,
                                    &new_song.physical_files,
                                    new_song.duration).unwrap(); // TODO: errors
@@ -399,9 +415,27 @@ const IMPORT_LIB: &[u8] = include_bytes!("lua/importlib.lua");
 const DEFAULT_IMPORT_SCRIPT: &[u8] = include_bytes!("lua/default_import.lua");
 const IMPORT_FUNC_KEY: &[u8] = b"Tsong Metadata Import Script";
 
+/// `mlua::Error` is not `Send`, so we can't put it through `anyhow` without
+/// a little bit of glue.
+trait MakeLuaErrorSyncSafe {
+    type Wat;
+    fn anyhowify(self) -> anyhow::Result<Self::Wat>;
+}
+
+impl<T> MakeLuaErrorSyncSafe for mlua::Result<T> {
+    type Wat = T;
+    fn anyhowify(self) -> anyhow::Result<Self::Wat> {
+        match self {
+            Ok(x) => Ok(x),
+            Err(x) => Err(anyhow!("{}", x)),
+        }
+    }
+}
+
 impl LogicalSong {
-    pub fn import_metadata(&mut self, file: &PhysicalFile) {
-        TLS.with(|cell| {
+    pub fn import_metadata(&mut self, file: &PhysicalFile)
+    -> anyhow::Result<()> {
+        let res = TLS.with(|cell| -> anyhow::Result<()> {
             let mut cellref = cell.borrow_mut();
             let (ref mut last_load_generation, ref mut lua_state) = *cellref;
             if lua_state.is_none()
@@ -410,11 +444,11 @@ impl LogicalSong {
                 *last_load_generation = SCRIPT_GENERATION.snapshot();
                 let lua = Lua::new();
                 lua.load(IMPORT_LIB).set_name("importlib.lua").unwrap()
-                    .exec().unwrap();
+                    .exec().anyhowify()?;
                 // TODO: put this script in a file so it can be customized
                 let script_func = lua.load(DEFAULT_IMPORT_SCRIPT)
                     .set_name("import.lua").unwrap()
-                    .into_function().unwrap();
+                    .into_function().anyhowify()?;
                 lua.set_named_registry_value(IMPORT_FUNC_KEY, script_func)
                     .unwrap();
                 *lua_state = Some(lua);
@@ -423,33 +457,38 @@ impl LogicalSong {
             // Script is in place. Go, go, go!
             // Set up the globals...
             let globals = lua.globals();
-            let inmeta = lua.create_table_from(file.get_raw_metadata().iter().map(|(a,b)| (a.as_str(), b.as_str()))).unwrap();
-            globals.raw_set("inmeta", inmeta).unwrap();
-            let outmeta = lua.create_table_from(self.user_metadata.iter().map(|(a,b)| (a.as_str(), b.as_str()))).unwrap();
-            globals.raw_set("outmeta", outmeta).unwrap();
-            globals.raw_set("filename", file.get_absolute_paths()[0].file_name().unwrap().to_string_lossy().into_owned()).unwrap();
-            globals.raw_set("path", file.get_absolute_paths()[0].to_string_lossy().into_owned()).unwrap();
-            let filenames = lua.create_table_from(file.get_absolute_paths().iter().enumerate().map(|(i, x)| (i+1, x.file_name().unwrap().to_string_lossy().into_owned()))).unwrap();
-            globals.raw_set("filenames", filenames).unwrap();
-            let paths = lua.create_table_from(file.get_absolute_paths().iter().enumerate().map(|(i, x)| (i+1, x.to_string_lossy().into_owned()))).unwrap();
-            globals.raw_set("paths", paths).unwrap();
-            globals.raw_set("file_id", file.get_id().to_string()).unwrap();
+            let inmeta = lua.create_table_from(file.get_raw_metadata().iter().map(|(a,b)| (a.as_str(), b.as_str()))).anyhowify()?;
+            globals.raw_set("inmeta", inmeta).anyhowify()?;
+            let outmeta = lua.create_table_from(self.user_metadata.iter().map(|(a,b)| (a.as_str(), b.as_str()))).anyhowify()?;
+            globals.raw_set("outmeta", outmeta).anyhowify()?;
+            globals.raw_set("filename", file.get_absolute_paths()[0].file_name().unwrap().to_string_lossy().into_owned()).anyhowify()?;
+            globals.raw_set("path", file.get_absolute_paths()[0].to_string_lossy().into_owned()).anyhowify()?;
+            let filenames = lua.create_table_from(file.get_absolute_paths().iter().enumerate().map(|(i, x)| (i+1, x.file_name().unwrap().to_string_lossy().into_owned()))).anyhowify()?;
+            globals.raw_set("filenames", filenames).anyhowify()?;
+            let paths = lua.create_table_from(file.get_absolute_paths().iter().enumerate().map(|(i, x)| (i+1, x.to_string_lossy().into_owned()))).anyhowify()?;
+            globals.raw_set("paths", paths).anyhowify()?;
+            globals.raw_set("file_id", file.get_id().to_string()).anyhowify()?;
             let song_id: Option<i64> = if self.id.inner == 0 { None }
             else { Some(self.id.inner.try_into().unwrap()) };
-            globals.raw_set("song_id", song_id).unwrap();
+            globals.raw_set("song_id", song_id).anyhowify()?;
             let func: Function
                 = lua.named_registry_value(IMPORT_FUNC_KEY).unwrap();
             // TODO: handle errors...
-            let _: () = func.call(()).unwrap();
+            let _: () = func.call(()).anyhowify()?;
             let mut new_metadata = BTreeMap::new();
-            let outmeta: Table = globals.raw_get("outmeta").unwrap();
+            let outmeta: Table = globals.raw_get("outmeta").anyhowify()?;
             for res in outmeta.pairs() {
-                let (k, v) = res.unwrap();
+                let (k, v) = res.anyhowify()?;
                 new_metadata.insert(k, v);
             }
+            new_metadata.insert("duration".to_owned(),
+                                format!("{}", file.get_duration()));
             self.user_metadata = new_metadata;
+            Ok(())
         });
-        self.user_metadata.insert("duration".to_owned(),
-                                  format!("{}", file.get_duration()));
+        match res {
+            Ok(_) => Ok(()),
+            Err(x) => Err(anyhow!("{}", x)),
+        }
     }
 }

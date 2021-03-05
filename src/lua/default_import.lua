@@ -92,15 +92,15 @@ for _, key in ipairs {
    end
 end
 
--- Some metadata keys are present as `_number`. Tsong prefers to end such
--- metadata with `#`. Also, some (but not all) conventions for `_number`
+-- Some metadata keys that represent numbers... Tsong prefers to end such
+-- metadata with `#`. Also, some (but not all) conventions for number
 -- metadata include both the index and the count in the same metadata tag.
 -- Tsong prefers to split the two.
 for _, base in ipairs { "disc", "track" } do
-   local value = consume_tag(base .. "_number")
-      or consume_tag(base:sub(1,1):upper() .. base:sub(2,-1) .. "_number")
-      or consume_tag(base:upper() .. "_NUMBER")
-      or consume_tag("id3v2_" .. base .. "_number")
+   local value = consume_tag(base)
+      or consume_tag(base:sub(1,1):upper() .. base:sub(2,-1))
+      or consume_tag(base:upper())
+      or consume_tag("id3v2_" .. base)
    if value then
       local index,count = value:match("^0*([0-9]+)[ \t]*/[ \t]*(0*[0-9]+)$")
       if index then
@@ -111,8 +111,8 @@ for _, base in ipairs { "disc", "track" } do
          if index then
             outmeta[base.."#"] = index
          else
-            -- put it back in inmeta, let it become "raw_*_number"
-            inmeta[base .. "_number"] = value
+            -- put it back in inmeta, let it become "raw_*"
+            inmeta[base] = value
          end
       end
    end
@@ -222,12 +222,6 @@ if outmeta.genre and #outmeta.genre <= 3
       "Audiobook", "Audio Theatre", "Neue Deutsche Welle", "Podcast",
       "Indie-Rock", "G-Funk", "Dubstep", "Garage Rock", "Psybient"
    }
-   assert(GENRES[0] == "Blues")
-   assert(GENRES[69] == "Show Tunes")
-   assert(GENRES[133] == nil)
-   assert(GENRES[156] == "Dub")
-   assert(GENRES[191] == "Psybient")
-   assert(GENRES[192] == nil)
    -- What's the difference between "Humor" and "Comedy"? Why does adding
    -- "Euro-" before a genre make a different genre? Why is "US Native"
    -- distinct from "Tribal" which is distinct from "Ethnic"? Why are "Primus"
