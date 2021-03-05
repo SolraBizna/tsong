@@ -8,9 +8,7 @@ use lazy_static::lazy_static;
 use arrayref::array_ref;
 
 use std::{
-    borrow::Cow,
     collections::{BTreeMap, HashMap, hash_map::Entry},
-    ffi::OsStr,
     fmt,
     fmt::{Debug, Display, Formatter},
     io,
@@ -24,8 +22,6 @@ use lsx::{
     sha256,
     sha256::BufSha256,
 };
-
-use logical::SimilarityRec;
 
 pub type PhysicalFileRef = Reference<PhysicalFile>;
 
@@ -107,6 +103,9 @@ pub struct PhysicalFile {
 }
 
 impl PhysicalFile {
+    pub fn get_id(&self) -> &FileID {
+        &self.id
+    }
     pub fn get_absolute_paths(&self) -> &[PathBuf] {
         &self.absolute_paths[..]
     }
@@ -271,14 +270,7 @@ pub fn scanned_file(id: &FileID, size: u64, _mtime: u64, duration: u32,
             ent.insert(vec![record.clone()]);
         },
     }
-    let record = record.read().unwrap();
-    let similarity_rec = SimilarityRec::new(absolute_path.file_name()
-                                            .map(OsStr::to_string_lossy)
-                                            .map(Cow::into_owned)
-                                            .unwrap(),
-                                            duration,
-                                            &record.raw_meta);
-    logical::incorporate_physical(id, &record.raw_meta, similarity_rec);
+    logical::incorporate_physical(record);
     Ok(())
 }
 

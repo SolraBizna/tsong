@@ -4,9 +4,13 @@
 
 use crate::*;
 use lazy_static::lazy_static;
+use mlua::{Lua, Function, Table};
 
 use std::{
+    borrow::Cow,
+    cell::RefCell,
     collections::{BTreeMap, HashMap},
+    convert::TryInto,
     ffi::OsStr,
     fmt, fmt::{Display, Debug, Formatter},
     sync::{Arc, Mutex, RwLock, RwLockReadGuard},
@@ -131,37 +135,6 @@ lazy_static! {
         = RwLock::new(HashMap::new());
 }
 
-/// Returns the metadata key to use for a raw FFMPEG metadata key, or `None`
-/// if the given key is "unsafe".
-fn map_raw_meta(k: &str) -> Option<&str> {
-    match k {
-        "title" | "artist" | "album" => Some(k),
-        "loop_start" | "LOOP_START" => Some("loop_start"),
-        "loop_end" | "LOOP_END" => Some("loop_end"),
-        "disc" => Some("disc#"),
-        "track" => Some("track#"),
-        _ => None,
-    }
-}
-
-/// Takes some raw, FFMPEG metadata, and returns the Tsong metadata we want to
-/// create from it.
-fn munch_ffmpeg_metadata(in_meta: &BTreeMap<String, String>,
-                         duration: u32)
--> BTreeMap<String, String> {
-    let mut ret = BTreeMap::new();
-    ret.insert("unchecked".to_owned(), "true".to_owned());
-    for (k, v) in in_meta.iter() {
-        // TODO: maintain Unicode NFD
-        match map_raw_meta(k) {
-            Some(k) => ret.insert(k.to_owned(), v.to_owned()),
-            None => ret.insert("raw_".to_owned() + k, v.to_owned()),
-        };
-    }
-    ret.insert("duration".to_owned(), format!("{}", duration));
-    ret
-}
-
 fn add_possibilities(songs: Option<&Vec<LogicalSongRef>>,
                      possibilities: &mut Vec<(LogicalSongRef, i32)>,
                      similarity_rec: &SimilarityRec)
@@ -188,12 +161,20 @@ fn add_possibilities(songs: Option<&Vec<LogicalSongRef>>,
 /// Called by the appropriate routines in `physical` when a physical file is
 /// found. We will either match this file to a logical song already in our
 /// database, or make a new (fresly-imported) song.
-pub fn incorporate_physical(file_id: &FileID,
-                            metadata: &BTreeMap<String, String>,
-                            similarity_rec: SimilarityRec) {
+pub fn incorporate_physical(file_ref: PhysicalFileRef) {
+    let file = file_ref.read().unwrap();
+    let duration = file.get_duration();
+    let absolute_path = file.get_absolute_paths().last().unwrap();
+    let metadata = file.get_raw_metadata();
+    let similarity_rec = SimilarityRec::new(absolute_path.file_name()
+                                            .map(OsStr::to_string_lossy)
+                                            .map(Cow::into_owned)
+                                            .unwrap(),
+                                            duration,
+                                            &metadata);
     let _ = INCORPORATION_LOCK.lock().unwrap();
     // physical file already incorporated? if so, nothing to do
-    if let Some(_) = SONGS_BY_FILE_ID.read().unwrap().get(file_id) {
+    if let Some(_) = SONGS_BY_FILE_ID.read().unwrap().get(file.get_id()) {
         eprintln!("Same exact song! {:?}", metadata.get("title"));
         return
     }
@@ -221,7 +202,7 @@ pub fn incorporate_physical(file_id: &FileID,
         let possibility = &possibilities[0];
         eprintln!("Existing song! score = {}, title = {:?}", possibility.1, possibility.0.read().unwrap().user_metadata.get("title"));
         let mut logical_song = possibility.0.write().unwrap();
-        logical_song.physical_files.push(*file_id);
+        logical_song.physical_files.push(*file.get_id());
         logical_song.similarity_recs.push(similarity_rec);
         db::update_song_physical_files(logical_song.id,
                                        &logical_song.physical_files);
@@ -231,13 +212,13 @@ pub fn incorporate_physical(file_id: &FileID,
         // no match! make a new song
         let new_song_ref = LogicalSongRef::new(LogicalSong {
             id: SongID::from_inner(0),
-            user_metadata: munch_ffmpeg_metadata(&metadata,
-                                                 similarity_rec.duration),
-            physical_files: vec![*file_id],
+            user_metadata: BTreeMap::new(),
+            physical_files: vec![*file.get_id()],
             duration: similarity_rec.duration,
             similarity_recs: vec![similarity_rec.clone()],
         });
         let mut new_song = new_song_ref.write().unwrap();
+        new_song.import_metadata(&file);
         let song_id = db::add_song(&new_song.user_metadata,
                                    &new_song.physical_files,
                                    new_song.duration).unwrap(); // TODO: errors
@@ -246,7 +227,7 @@ pub fn incorporate_physical(file_id: &FileID,
         drop(new_song);
         LOGICAL_SONGS.write().unwrap().push(new_song_ref.clone());
         SONGS_BY_SONG_ID.write().unwrap().insert(song_id,new_song_ref.clone());
-        SONGS_BY_FILE_ID.write().unwrap().insert(*file_id,new_song_ref.clone());
+        SONGS_BY_FILE_ID.write().unwrap().insert(*file.get_id(),new_song_ref.clone());
         SONGS_BY_P_FILENAME.write().unwrap().entry(similarity_rec.filename)
             .or_insert_with(Vec::new).push(new_song_ref.clone());
         SONGS_BY_P_TITLE.write().unwrap().entry(similarity_rec.title)
@@ -403,4 +384,72 @@ pub fn add_song_from_db(id: SongID, user_metadata: BTreeMap<String, String>,
     }
     neu.similarity_recs = similarity_recs;
     GENERATION.bump();
+}
+
+lazy_static! {
+    static ref SCRIPT_GENERATION: GenerationTracker = GenerationTracker::new();
+}
+
+thread_local! {
+    static TLS: RefCell<(GenerationValue, Option<Lua>)>
+        = RefCell::new((Default::default(), None));
+}
+
+const IMPORT_LIB: &[u8] = include_bytes!("lua/importlib.lua");
+const DEFAULT_IMPORT_SCRIPT: &[u8] = include_bytes!("lua/default_import.lua");
+const IMPORT_FUNC_KEY: &[u8] = b"Tsong Metadata Import Script";
+
+impl LogicalSong {
+    pub fn import_metadata(&mut self, file: &PhysicalFile) {
+        TLS.with(|cell| {
+            let mut cellref = cell.borrow_mut();
+            let (ref mut last_load_generation, ref mut lua_state) = *cellref;
+            if lua_state.is_none()
+            || !SCRIPT_GENERATION.has_not_changed_since(last_load_generation) {
+                *lua_state = None;
+                *last_load_generation = SCRIPT_GENERATION.snapshot();
+                let lua = Lua::new();
+                lua.load(IMPORT_LIB).set_name("importlib.lua").unwrap()
+                    .exec().unwrap();
+                // TODO: put this script in a file so it can be customized
+                let script_func = lua.load(DEFAULT_IMPORT_SCRIPT)
+                    .set_name("import.lua").unwrap()
+                    .into_function().unwrap();
+                lua.set_named_registry_value(IMPORT_FUNC_KEY, script_func)
+                    .unwrap();
+                *lua_state = Some(lua);
+            }
+            let lua = lua_state.as_ref().unwrap();
+            // Script is in place. Go, go, go!
+            // Set up the globals...
+            let globals = lua.globals();
+            let inmeta = lua.create_table_from(file.get_raw_metadata().iter().map(|(a,b)| (a.as_str(), b.as_str()))).unwrap();
+            globals.raw_set("inmeta", inmeta).unwrap();
+            let outmeta = lua.create_table_from(self.user_metadata.iter().map(|(a,b)| (a.as_str(), b.as_str()))).unwrap();
+            globals.raw_set("outmeta", outmeta).unwrap();
+            globals.raw_set("filename", file.get_absolute_paths()[0].file_name().unwrap().to_string_lossy().into_owned()).unwrap();
+            globals.raw_set("path", file.get_absolute_paths()[0].to_string_lossy().into_owned()).unwrap();
+            let filenames = lua.create_table_from(file.get_absolute_paths().iter().enumerate().map(|(i, x)| (i+1, x.file_name().unwrap().to_string_lossy().into_owned()))).unwrap();
+            globals.raw_set("filenames", filenames).unwrap();
+            let paths = lua.create_table_from(file.get_absolute_paths().iter().enumerate().map(|(i, x)| (i+1, x.to_string_lossy().into_owned()))).unwrap();
+            globals.raw_set("paths", paths).unwrap();
+            globals.raw_set("file_id", file.get_id().to_string()).unwrap();
+            let song_id: Option<i64> = if self.id.inner == 0 { None }
+            else { Some(self.id.inner.try_into().unwrap()) };
+            globals.raw_set("song_id", song_id).unwrap();
+            let func: Function
+                = lua.named_registry_value(IMPORT_FUNC_KEY).unwrap();
+            // TODO: handle errors...
+            let _: () = func.call(()).unwrap();
+            let mut new_metadata = BTreeMap::new();
+            let outmeta: Table = globals.raw_get("outmeta").unwrap();
+            for res in outmeta.pairs() {
+                let (k, v) = res.unwrap();
+                new_metadata.insert(k, v);
+            }
+            self.user_metadata = new_metadata;
+        });
+        self.user_metadata.insert("duration".to_owned(),
+                                  format!("{}", file.get_duration()));
+    }
 }
