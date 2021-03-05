@@ -254,3 +254,27 @@ pub fn try_create_config_dir() -> std::io::Result<()> {
     let src = &CONFIG_PATHS[CONFIG_PATHS.len() - 1];
     fs::create_dir_all(src)
 }
+
+/// Opens the most specific available configuration file with the given name,
+/// if one is found. Returns `Ok(None)` if no configuration file was found.
+pub fn open_best_for_read(name: &str) -> anyhow::Result<Option<File>> {
+    let backed_up_name = name.to_owned() + BACKUP_SUFFIX;
+    for path in CONFIG_PATHS.iter().rev() {
+        let mut path_buf = path.to_owned();
+        path_buf.push(name);
+        if path_buf.exists() {
+            return File::open(path_buf).map(|x| Some(x))
+                .context("Error while reading a config file")
+        }
+        else {
+            path_buf.pop();
+            path_buf.push(&backed_up_name);
+            if path_buf.exists() {
+                return File::open(path_buf).map(|x| Some(x))
+                    .context("Error while reading a backup config file")
+            }
+        }
+    }
+    Ok(None)
+}
+

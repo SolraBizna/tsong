@@ -15,6 +15,7 @@ use std::{
     convert::TryInto,
     ffi::OsStr,
     fmt, fmt::{Display, Debug, Formatter},
+    io::{Read, Write},
     sync::{Arc, Mutex, RwLock, RwLockReadGuard},
 };
 
@@ -404,6 +405,7 @@ pub fn add_song_from_db(id: SongID, user_metadata: BTreeMap<String, String>,
 
 lazy_static! {
     static ref SCRIPT_GENERATION: GenerationTracker = GenerationTracker::new();
+    static ref IMPORT_SCRIPT_LOCK: Mutex<()> = Mutex::new(());
 }
 
 thread_local! {
@@ -414,6 +416,20 @@ thread_local! {
 const IMPORT_LIB: &[u8] = include_bytes!("lua/importlib.lua");
 const DEFAULT_IMPORT_SCRIPT: &[u8] = include_bytes!("lua/default_import.lua");
 const IMPORT_FUNC_KEY: &[u8] = b"Tsong Metadata Import Script";
+
+fn try_get_import_script() -> anyhow::Result<Option<Vec<u8>>> {
+    if let Some(mut f) = config::open_best_for_read("import.lua")? {
+        let mut ret = Vec::new();
+        f.read_to_end(&mut ret)?;
+        Ok(Some(ret))
+    }
+    else {
+        let mut f = config::open_for_write("import.lua")?;
+        f.write_all(DEFAULT_IMPORT_SCRIPT)?;
+        f.finish()?;
+        Ok(None)
+    }
+}
 
 /// `mlua::Error` is not `Send`, so we can't put it through `anyhow` without
 /// a little bit of glue.
@@ -432,6 +448,37 @@ impl<T> MakeLuaErrorSyncSafe for mlua::Result<T> {
     }
 }
 
+fn load_import_script(lua: &Lua) -> anyhow::Result<Function> {
+    let script_func = match try_get_import_script() {
+        Ok(Some(x)) => {
+            lua.load(&x[..])
+                .set_name("import.lua").unwrap()
+                .into_function().anyhowify()
+                .map(|x| Some(x))
+        },
+        Ok(None) => Ok(None),
+        Err(x) => Err(x)
+    };
+    let script_func = match script_func {
+        Ok(x) => x,
+        Err(x) => {
+            eprintln!("Error loading user-provided \
+                       \"import.lua\". Using the built-in \
+                       script.\n{}\n", x);
+            None
+        },
+    };
+    let script_func = match script_func {
+        Some(x) => x,
+        None => {
+            lua.load(DEFAULT_IMPORT_SCRIPT)
+                .set_name("import.lua").unwrap()
+                .into_function().anyhowify()?
+        }
+    };
+    Ok(script_func)
+}
+
 impl LogicalSong {
     pub fn import_metadata(&mut self, file: &PhysicalFile)
     -> anyhow::Result<()> {
@@ -445,10 +492,7 @@ impl LogicalSong {
                 let lua = Lua::new();
                 lua.load(IMPORT_LIB).set_name("importlib.lua").unwrap()
                     .exec().anyhowify()?;
-                // TODO: put this script in a file so it can be customized
-                let script_func = lua.load(DEFAULT_IMPORT_SCRIPT)
-                    .set_name("import.lua").unwrap()
-                    .into_function().anyhowify()?;
+                let script_func = load_import_script(&lua)?;
                 lua.set_named_registry_value(IMPORT_FUNC_KEY, script_func)
                     .unwrap();
                 *lua_state = Some(lua);
