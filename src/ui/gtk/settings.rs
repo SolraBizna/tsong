@@ -81,7 +81,7 @@ impl Controller {
                      .label("Music Locations:").halign(Align::Start).build());
         let locations_window = ScrolledWindowBuilder::new()
             .name("locations")
-            .hscrollbar_policy(PolicyType::Never)
+            .hscrollbar_policy(PolicyType::Automatic)
             .vscrollbar_policy(PolicyType::Automatic)
             .vexpand(true)
             .build();
