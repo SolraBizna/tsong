@@ -14,7 +14,6 @@ use gtk::{
     PolicyType,
     ScrolledWindowBuilder,
     SeparatorBuilder,
-    ToolButton, ToolButtonBuilder,
     TreeView, TreeViewBuilder, TreeViewColumn, TreePath,
     Widget,
     Window, WindowBuilder, WindowType,
@@ -45,8 +44,8 @@ pub struct Controller {
     column_tag_column: TreeViewColumn,
     columns_model: ListStore,
     columns_view: TreeView,
-    delete_column_button: ToolButton,
-    new_column_button: ToolButton,
+    delete_column_button: Button,
+    new_column_button: Button,
     notebook: Notebook,
     columns_page: u32,
     meta_page: u32,
@@ -57,7 +56,8 @@ pub struct Controller {
 }
 
 impl Controller {
-    pub fn new(parent: Weak<RefCell<super::Controller>>)
+    pub fn new(parent: Weak<RefCell<super::Controller>>,
+               icons: &mut super::Icons)
     -> Rc<RefCell<Controller>> {
         let window = WindowBuilder::new()
             .name("editor").type_(WindowType::Toplevel)
@@ -125,14 +125,14 @@ impl Controller {
         let column_button_box = ButtonBoxBuilder::new()
             .layout_style(ButtonBoxStyle::Expand)
             .build();
-        let delete_column_button
-            = ToolButtonBuilder::new().icon_name("list-remove").build();
+        let delete_column_button = ButtonBuilder::new().build();
         delete_column_button.set_sensitive(false);
         column_button_box.add(&delete_column_button);
-        let new_column_button
-            = ToolButtonBuilder::new().icon_name("list-add").build();
+        icons.set_icon(&delete_column_button, "tsong-remove");
+        let new_column_button = ButtonBuilder::new().build();
         column_button_box.add(&new_column_button);
         columns_box.add(&column_button_box);
+        icons.set_icon(&new_column_button, "tsong-add");
         // The buttons
         big_box.pack_start(&SeparatorBuilder::new()
                            .orientation(Orientation::Horizontal)

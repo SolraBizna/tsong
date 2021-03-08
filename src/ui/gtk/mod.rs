@@ -13,8 +13,7 @@ use gtk::{
     DialogFlags,
     Entry, EntryBuilder,
     Grid, GridBuilder,
-    IconLookupFlags, IconTheme,
-    Image,
+    IconTheme,
     Label, LabelBuilder,
     ListStore,
     MessageDialog, MessageType,
@@ -29,7 +28,6 @@ use gtk::{
     StateFlags,
     StyleContext,
     ToggleButton, ToggleButtonBuilder,
-    ToolButton, ToolButtonBuilder,
     TreeIter, TreePath, TreeStore, TreeRowReference, TreeModelFlags,
     TreeView, TreeViewBuilder, TreeViewColumn,
     VolumeButton, VolumeButtonBuilder,
@@ -38,7 +36,6 @@ use gtk::{
 use gdk::{
     Geometry,
     Gravity,
-    RGBA,
     Screen,
     WindowHints,
 };
@@ -55,33 +52,19 @@ use std::{
 
 mod settings;
 mod playlist_edit;
+mod icons;
+
+pub use icons::Icons as Icons;
 
 const INACTIVE_WEIGHT: u32 = 400; // normal weight
 const ACTIVE_WEIGHT: u32 = 800; // bold
 
-/// Fallback labels for missing icons.
-mod fallback {
-    pub const ROLLUP: &str = "\u{1F783}\u{FE0E}";
-    pub const ROLLDOWN: &str = "\u{1F781}\u{FE0E}";
-    pub const SETTINGS: &str = "\u{2699}\u{FE0E}";
-    pub const SHUFFLE: &str = "\u{1F500}\u{FE0E}";
-    pub const LOOP: &str = "\u{1F501}\u{FE0E}";
-    pub const LOOP_ONE: &str = "\u{1F502}\u{FE0E}";
-    pub const PREV: &str = "\u{1F844}\u{FE0E}";
-    pub const NEXT: &str = "\u{1F846}\u{FE0E}";
-    // These don't look good...
-    pub const PLAY: &str = "\u{23F5}\u{FE0E}";
-    pub const PAUSE: &str = "\u{23F8}\u{FE0E}";
-    // But this goes weird and off-center from the pause glyph...
-    //pub const PLAY: &str = "\u{25B8}\u{FE0E}";
-}
-
 pub struct Controller {
     active_playlist: Option<PlaylistRef>,
     control_box: gtk::Box,
-    delete_playlist_button: ToolButton,
+    delete_playlist_button: Button,
     last_built_playlist: Option<PlaylistRef>,
-    new_playlist_button: ToolButton,
+    new_playlist_button: Button,
     next_button: Button,
     osd: Label,
     play_button: Button,
@@ -108,16 +91,7 @@ pub struct Controller {
     remote_time: f64,
     last_active_playlist: Option<(TreeIter,PlaylistRef)>,
     last_active_song: Option<(Option<TreeIter>,LogicalSongRef)>,
-    prev_icon: Option<Image>,
-    play_icon: Option<Image>,
-    pause_icon: Option<Image>,
-    next_icon: Option<Image>,
-    rollup_icon: Option<Image>,
-    rolldown_icon: Option<Image>,
-    shuffle_icon: Option<Image>,
-    loop_icon: Option<Image>,
-    loop_one_icon: Option<Image>,
-    settings_icon: Option<Image>,
+    icons: Icons,
     scan_thread: ScanThread,
     rolled_down_height: i32,
     settings_controller: Option<Rc<RefCell<settings::Controller>>>,
@@ -125,20 +99,6 @@ pub struct Controller {
     periodic_timer: Option<SourceId>,
     volume_changed: bool,
     me: Option<Weak<RefCell<Controller>>>,
-}
-
-fn set_image(button: &Button, icon: &Option<Image>, fallback: &str) {
-    button.set_image(icon.as_ref());
-    match icon {
-        Some(_) => {
-            button.set_label("");
-            let _ = button.set_property("always-show-image", &true);
-        },
-        None => {
-            button.set_label(fallback);
-            let _ = button.set_property("always-show-image", &false);
-        },
-    }
 }
 
 impl Controller {
@@ -223,11 +183,9 @@ impl Controller {
         let playlist_button_box = ButtonBoxBuilder::new()
             .layout_style(ButtonBoxStyle::Expand)
             .build();
-        let delete_playlist_button
-            = ToolButtonBuilder::new().icon_name("list-remove").build();
+        let delete_playlist_button = ButtonBuilder::new().build();
         playlist_button_box.add(&delete_playlist_button);
-        let new_playlist_button
-            = ToolButtonBuilder::new().icon_name("list-add").build();
+        let new_playlist_button = ButtonBuilder::new().build();
         playlist_button_box.add(&new_playlist_button);
         rollup_grid.attach(&playlist_button_box, 0, 1, 1, 1);
         // and the play...list
@@ -297,6 +255,17 @@ impl Controller {
         // (ignore errors because this is not critical to functionality)
         // (fun fact! if this is an f32 instead of an f64, it breaks!)
         let _ = playlist_name_cell.set_property("scale", &0.80);
+        // now, icons!
+        let mut icons: Icons = Default::default();
+        icons.set_icon(&settings_button, "tsong-settings");
+        icons.set_icon(&prev_button, "tsong-prev");
+        icons.set_icon(&next_button, "tsong-next");
+        icons.set_icon(&play_button, "tsong-pause");
+        icons.set_icon(&rollup_button, "tsong-rollup");
+        icons.set_icon(&shuffle_button, "tsong-shuffle");
+        icons.set_icon(&playmode_button, "tsong-loop");
+        icons.set_icon(&new_playlist_button, "tsong-add");
+        icons.set_icon(&delete_playlist_button, "tsong-remove");
         let nu = Rc::new(RefCell::new(Controller {
             rollup_button, settings_button, prev_button, next_button,
             shuffle_button, playmode_button, play_button, volume_button,
@@ -308,14 +277,10 @@ impl Controller {
             playlist_edit_button,
             remote: None, remote_time: -1.0,
             last_active_playlist, last_active_song: None,
-            prev_icon: None, next_icon: None,
-            play_icon: None, pause_icon: None,
-            rollup_icon: None, rolldown_icon: None, settings_icon: None,
-            loop_icon: None, loop_one_icon: None, shuffle_icon: None,
             active_playlist: None, playlist_generation: Default::default(),
             last_built_playlist: None, me: None, settings_controller: None,
             playlist_edit_controller: None, rolled_down_height: 400,
-            periodic_timer: None, volume_changed: false,
+            periodic_timer: None, volume_changed: false, icons,
         }));
         // Throughout this application, we make use of a hack.
         // Each signal that depends on a Controller starts with an attempt to
@@ -324,8 +289,8 @@ impl Controller {
         // controller, so we ignore the signal.
         let mut this = nu.borrow_mut();
         this.me = Some(Rc::downgrade(&nu));
-        this.settings_controller = Some(settings::Controller::new(Rc::downgrade(&nu)));
-        this.playlist_edit_controller = Some(playlist_edit::Controller::new(Rc::downgrade(&nu)));
+        this.settings_controller = Some(settings::Controller::new(Rc::downgrade(&nu), &mut this.icons));
+        this.playlist_edit_controller = Some(playlist_edit::Controller::new(Rc::downgrade(&nu), &mut this.icons));
         this.remote = Some(Remote::new(Rc::downgrade(&nu)));
         this.delete_playlist_button
             .set_sensitive(this.delete_playlist_button_should_be_sensitive());
@@ -699,43 +664,6 @@ impl Controller {
         drop(playlist);
         self.update_playmode_button();
     }
-    fn reload_icons(&mut self) {
-        // TODO: reload icons when theme is changed
-        let color = self.settings_button.get_style_context()
-            .get_color(StateFlags::NORMAL);
-        self.prev_icon = get_icon(&color, "tsong-previous");
-        self.next_icon = get_icon(&color, "tsong-next");
-        self.play_icon = get_icon(&color, "tsong-play");
-        self.pause_icon = get_icon(&color, "tsong-pause");
-        self.rollup_icon = get_icon(&color, "tsong-rollup");
-        self.rolldown_icon = get_icon(&color, "tsong-rolldown");
-        self.shuffle_icon = get_icon(&color, "tsong-shuffle");
-        self.loop_icon = get_icon(&color, "tsong-loop");
-        self.loop_one_icon = get_icon(&color, "tsong-loop-one");
-        self.settings_icon = get_icon(&color, "tsong-settings");
-        set_image(self.settings_button.upcast_ref(), &self.settings_icon,
-                  fallback::SETTINGS);
-        set_image(&self.prev_button, &self.prev_icon, fallback::PREV);
-        set_image(&self.next_button, &self.next_icon, fallback::NEXT);
-        if playback::get_playback_status().is_playing() {
-            set_image(&self.play_button, &self.pause_icon, fallback::PAUSE);
-        }
-        else {
-            set_image(&self.play_button, &self.play_icon, fallback::PLAY);
-        }
-        if self.rollup_grid.get_visible() {
-            set_image(&self.rollup_button, &self.rollup_icon,
-                      fallback::ROLLUP);
-        }
-        else {
-            set_image(&self.rollup_button, &self.rolldown_icon,
-                      fallback::ROLLDOWN);
-        }
-        set_image(self.shuffle_button.upcast_ref(), &self.shuffle_icon,
-                  fallback::SHUFFLE);
-        set_image(self.playmode_button.upcast_ref(), &self.loop_icon,
-                  fallback::LOOP);
-    }
     fn activate_playlist_by_path(&mut self, wo: &TreePath) {
         let id = match self.playlists_model.get_iter(wo)
             .map(|x| self.playlists_model.get_value(&x, 0))
@@ -878,10 +806,10 @@ impl Controller {
     fn update_view(&mut self) {
         let (status, active_song) = playback::get_status_and_active_song();
         if status.is_playing() {
-            set_image(&self.play_button, &self.pause_icon, fallback::PAUSE);
+            self.icons.set_icon(&self.play_button, "tsong-pause");
         }
         else {
-            set_image(&self.play_button, &self.play_icon, fallback::PLAY);
+            self.icons.set_icon(&self.play_button, "tsong-play");
         }
         let active_song = match active_song {
             None => {
@@ -1001,7 +929,7 @@ impl Controller {
         let status = playback::get_playback_status();
         if status.is_playing() {
             playback::send_command(PlaybackCommand::Pause);
-            set_image(&self.play_button, &self.play_icon, fallback::PLAY);
+            self.icons.set_icon(&self.play_button, "tsong-play");
         }
         else {
             let song_to_play = if status == PlaybackStatus::Stopped {
@@ -1014,7 +942,7 @@ impl Controller {
                     .and_then(logical::get_song_by_song_id)
             } else { None };
             playback::send_command(PlaybackCommand::Play(song_to_play));
-            set_image(&self.play_button, &self.pause_icon, fallback::PAUSE);
+            self.icons.set_icon(&self.play_button, "tsong-pause");
             self.force_periodic();
         }
     }
@@ -1078,23 +1006,19 @@ impl Controller {
             None => {
                 self.playmode_button.set_sensitive(false);
                 self.playmode_button.set_active(false);
-                set_image(self.playmode_button.upcast_ref(),
-                          &self.loop_icon,
-                          fallback::LOOP);
+                self.icons.set_icon(&self.playmode_button, "tsong-loop");
                 self.remote.as_ref().unwrap().set_cur_playmode(Playmode::End.into());
             },
             Some(playlist) => {
                 self.playmode_button.set_sensitive(true);
                 let playmode = playlist.read().unwrap().get_playmode();
                 if playmode == Playmode::LoopOne {
-                    set_image(self.playmode_button.upcast_ref(),
-                              &self.loop_one_icon,
-                              fallback::LOOP_ONE);
+                    self.icons.set_icon(&self.playmode_button,
+                                        "tsong-loop-one");
                 }
                 else {
-                    set_image(self.playmode_button.upcast_ref(),
-                              &self.loop_icon,
-                              fallback::LOOP);
+                    self.icons.set_icon(&self.playmode_button,
+                                        "tsong-loop");
                 }
                 self.playmode_button.set_active(playmode != Playmode::End);
                 self.remote.as_ref().unwrap().set_cur_playmode(playmode.into());
@@ -1187,15 +1111,13 @@ impl Controller {
             geom.max_height = self.control_box.get_allocated_height();
             self.rolled_down_height = self.window.get_allocated_height();
             self.rollup_grid.hide();
-            set_image(&self.rollup_button, &self.rolldown_icon,
-                      fallback::ROLLDOWN);
+            self.icons.set_icon(&self.rollup_button, "tsong-rolldown");
             self.window.set_geometry_hints(Some(&self.window),
                                            Some(&geom), geom_mask);
         }
         else {
             self.rollup_grid.show();
-            set_image(&self.rollup_button, &self.rollup_icon,
-                      fallback::ROLLUP);
+            self.icons.set_icon(&self.rollup_button, "tsong-rollup");
             self.window.set_geometry_hints(Some(&self.window),
                                            Some(&geom), geom_mask);
             self.window.resize(self.window.get_allocated_width(),
@@ -1267,6 +1189,11 @@ impl Controller {
         self.active_playlist.as_ref()
             .map(|x| x.write().unwrap()
                  .set_rule_code_and_columns(neu_code, neu_columns));
+    }
+    fn reload_icons(&mut self) {
+        let color = self.settings_button.get_style_context()
+            .get_color(StateFlags::NORMAL);
+        self.icons.reload_icons(&color);
     }
 }
 
@@ -1378,7 +1305,7 @@ impl RemoteTarget for Controller {
                     .and_then(logical::get_song_by_song_id)
             } else { None };
             playback::send_command(PlaybackCommand::Play(song_to_play));
-            set_image(&self.play_button, &self.pause_icon, fallback::PAUSE);
+            self.icons.set_icon(&self.play_button, "tsong-pause");
             self.force_periodic();
         }
         None
@@ -1412,15 +1339,6 @@ where T: IsA<Container>, W: IsA<Widget> {
         .valign(Align::Center).build();
     nu_box.pack_start(button, false, false, 0);
     control_box.add(&nu_box);
-}
-
-// O_O
-fn get_icon(color: &RGBA, wat: &str) -> Option<Image> {
-    let icon_theme = IconTheme::get_default()?;
-    let icon = icon_theme.lookup_icon(wat, 24,
-                                      IconLookupFlags::FORCE_SYMBOLIC)?;
-    let image = icon.load_symbolic(color, None, None, None).ok()?.0;
-    Some(Image::from_pixbuf(Some(&image)))
 }
 
 pub fn go() {

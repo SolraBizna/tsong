@@ -15,7 +15,6 @@ use gtk::{
     ResponseType,
     ScrolledWindowBuilder,
     SeparatorBuilder,
-    ToolButton, ToolButtonBuilder,
     TreeView, TreeViewBuilder, TreeViewColumn,
     Window, WindowBuilder, WindowType,
 };
@@ -40,8 +39,8 @@ pub struct Controller {
     apply_button: Button,
     cancel_button: Button,
     ok_button: Button,
-    delete_location_button: ToolButton,
-    new_location_button: ToolButton,
+    delete_location_button: Button,
+    new_location_button: Button,
     hostapi_view: ComboBox,
     hostapi_model: ListStore,
     audiodev_view: ComboBox,
@@ -51,7 +50,8 @@ pub struct Controller {
 }
 
 impl Controller {
-    pub fn new(parent: Weak<RefCell<super::Controller>>)
+    pub fn new(parent: Weak<RefCell<super::Controller>>,
+               icons: &mut super::Icons)
     -> Rc<RefCell<Controller>> {
         let pa = PortAudio::new().expect("Could not initialize PortAudio");
         let window = WindowBuilder::new()
@@ -97,14 +97,14 @@ impl Controller {
         let location_button_box = ButtonBoxBuilder::new()
             .layout_style(ButtonBoxStyle::Expand)
             .build();
-        let delete_location_button
-            = ToolButtonBuilder::new().icon_name("list-remove").build();
+        let delete_location_button = ButtonBuilder::new().build();
         delete_location_button.set_sensitive(false);
         location_button_box.add(&delete_location_button);
-        let new_location_button
-            = ToolButtonBuilder::new().icon_name("list-add").build();
+        icons.set_icon(&delete_location_button, "tsong-remove");
+        let new_location_button = ButtonBuilder::new().build();
         location_button_box.add(&new_location_button);
         big_box.add(&location_button_box);
+        icons.set_icon(&new_location_button, "tsong-add");
         // The buttons!
         big_box.pack_start(&SeparatorBuilder::new()
                             .orientation(Orientation::Horizontal).build(),
