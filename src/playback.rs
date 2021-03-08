@@ -603,8 +603,11 @@ impl InternalState {
     /// Goes to the next song in the playlist, which might involve looping
     /// and/or reshuffling the playlist.
     fn next_song(&mut self) {
-        let playlist = self.future_playlist.as_ref().unwrap()
-            .maybe_refreshed();
+        let future_playlist = match self.future_playlist.as_ref() {
+            Some(x) => x,
+            None => return,
+        };
+        let playlist = future_playlist.maybe_refreshed();
         let playmode = playlist.get_playmode();
         let songs = playlist.get_songs();
         let cur_index = match self.future_song.as_ref() {
@@ -647,8 +650,11 @@ impl InternalState {
     ///
     /// THIS IS NOT THE SAME BEHAVIOR AS THE `Prev` COMMAND!
     fn prev_song(&mut self) {
-        let playlist = self.future_playlist.as_ref().unwrap()
-            .maybe_refreshed();
+        let future_playlist = match self.future_playlist.as_ref() {
+            Some(x) => x,
+            None => return,
+        };
+        let playlist = future_playlist.maybe_refreshed();
         let songs = playlist.get_songs();
         let cur_index = match self.future_song.as_ref() {
             Some(future_song) => songs.iter().position(|x| x == future_song),
