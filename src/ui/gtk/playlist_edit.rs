@@ -9,12 +9,14 @@ use gtk::{
     Entry, EntryBuilder,
     LabelBuilder,
     ListStore,
+    Notebook, NotebookBuilder,
     Orientation,
     PolicyType,
     ScrolledWindowBuilder,
     SeparatorBuilder,
     ToolButton, ToolButtonBuilder,
     TreeView, TreeViewBuilder, TreeViewColumn, TreePath,
+    Widget,
     Window, WindowBuilder, WindowType,
 };
 use glib::{
@@ -38,12 +40,16 @@ pub struct Controller {
     me: Option<Weak<RefCell<Controller>>>,
     parent: Weak<RefCell<super::Controller>>,
     active_playlist: Option<PlaylistRef>,
+    selected_songs: Vec<LogicalSongRef>,
     column_tag_cell: CellRendererText,
     column_tag_column: TreeViewColumn,
     columns_model: ListStore,
     columns_view: TreeView,
     delete_column_button: ToolButton,
     new_column_button: ToolButton,
+    notebook: Notebook,
+    columns_page: u32,
+    meta_page: u32,
     playlist_code: Entry,
     apply_button: Button,
     cancel_button: Button,
@@ -54,26 +60,51 @@ impl Controller {
     pub fn new(parent: Weak<RefCell<super::Controller>>)
     -> Rc<RefCell<Controller>> {
         let window = WindowBuilder::new()
-            .name("playlist_editor").type_(WindowType::Toplevel)
-            .title("Tsong - Playlist Editor").build();
+            .name("editor").type_(WindowType::Toplevel)
+            .title("Tsong - Editor").build();
         let big_box = BoxBuilder::new()
-            .name("playlist_editor").orientation(Orientation::Vertical)
-            .spacing(4).build();
+            .name("editor").orientation(Orientation::Vertical)
+            .build();
         window.add(&big_box);
+        let notebook = NotebookBuilder::new().name("editor")
+            .show_border(false).build();
+        big_box.add(&notebook);
+        let columns_box = BoxBuilder::new()
+            .name("playlist_columns")
+            .orientation(Orientation::Vertical).spacing(4).build();
+        let columns_page = notebook.append_page::<_, Widget>(&columns_box, None);
+        notebook.set_tab_label_text(&columns_box, "Columns");
+        let sort_box = BoxBuilder::new()
+            .name("playlist_sort")
+            .orientation(Orientation::Vertical).spacing(4).build();
+        sort_box.add(&LabelBuilder::new().label("Not implemented yet. For \
+                                                 now, change the sort by \
+                                                 clicking on the column \
+                                                 headings.").build());
+        notebook.append_page::<_, Widget>(&sort_box, None);
+        notebook.set_tab_label_text(&sort_box, "Sort");
+        let rule_box = BoxBuilder::new()
+            .name("playlist_rules")
+            .orientation(Orientation::Vertical).spacing(4).build();
+        notebook.append_page::<_, Widget>(&rule_box, None);
+        notebook.set_tab_label_text(&rule_box, "Rules");
+        let meta_box = BoxBuilder::new()
+            .name("song_meta")
+            .orientation(Orientation::Vertical).spacing(4).build();
+        meta_box.add(&LabelBuilder::new().label("TODO").build());
+        let meta_page = notebook.append_page::<_, Widget>(&meta_box, None);
+        notebook.set_tab_label_text(&meta_box, "Song Metadata");
         // The playlist code:
         // TODO: make this a monospace font?
-        big_box.add(&LabelBuilder::new()
-                                .label("Playlist Rule:")
-                                .halign(Align::Start).build());
+        rule_box.add(&LabelBuilder::new()
+                        .label("Lua code:")
+                        .halign(Align::Start).build());
         let playlist_code = EntryBuilder::new().hexpand(true)
             .placeholder_text("Manually added songs only")
             .tooltip_text(PLAYLIST_CODE_TOOLTIP)
             .build();
-        big_box.add(&playlist_code);
+        rule_box.add(&playlist_code);
         // The columns
-        big_box.add(&LabelBuilder::new()
-                                .label("Shown Metadata:")
-                                .halign(Align::Start).build());
         let columns_window = ScrolledWindowBuilder::new()
             .name("columns")
             .hscrollbar_policy(PolicyType::Never)
@@ -90,7 +121,7 @@ impl Controller {
         column_tag_column.add_attribute(&column_tag_cell, "text", 0);
         columns_view.append_column(&column_tag_column);
         columns_window.add(&columns_view);
-        big_box.add(&columns_window);
+        columns_box.add(&columns_window);
         let column_button_box = ButtonBoxBuilder::new()
             .layout_style(ButtonBoxStyle::Expand)
             .build();
@@ -101,12 +132,13 @@ impl Controller {
         let new_column_button
             = ToolButtonBuilder::new().icon_name("list-add").build();
         column_button_box.add(&new_column_button);
-        big_box.add(&column_button_box);
+        columns_box.add(&column_button_box);
         // The buttons
         big_box.pack_start(&SeparatorBuilder::new()
-                                       .orientation(Orientation::Horizontal)
-                                       .build(), false, true, 6);
+                           .orientation(Orientation::Horizontal)
+                           .build(), false, true, 0);
         let buttons_box = BoxBuilder::new()
+            .name("buttons")
             .orientation(Orientation::Horizontal).build();
         let button_box = ButtonBoxBuilder::new()
             .spacing(6).build();
@@ -123,12 +155,12 @@ impl Controller {
         buttons_box.pack_end(&button_box, false, true, 0);
         big_box.add(&buttons_box);
         let ret = Rc::new(RefCell::new(Controller {
-            window,
+            window, notebook, columns_page, meta_page,
             parent, columns_model: ListStore::new(&[Type::String, Type::U32]),
             delete_column_button, new_column_button, column_tag_column,
             columns_view, apply_button, cancel_button, ok_button,
             column_tag_cell, playlist_code, active_playlist: None,
-            me: None
+            selected_songs: Vec::new(), me: None
         }));
         let mut this = ret.borrow_mut();
         this.me = Some(Rc::downgrade(&ret));
@@ -227,6 +259,12 @@ impl Controller {
     pub fn show(&mut self) {
         if !self.window.is_visible() {
             self.populate();
+            if self.selected_songs.len() == 0 {
+                self.notebook.set_current_page(Some(self.columns_page));
+            }
+            else {
+                self.notebook.set_current_page(Some(self.meta_page));
+            }
             self.window.show_all();
         }
         else {
@@ -242,19 +280,31 @@ impl Controller {
         if !self.window.is_visible() { return }
         self.populate();
     }
+    pub fn set_selected_songs(&mut self, songs: &[SongID]) {
+        self.selected_songs.clear();
+        self.selected_songs.reserve(songs.len());
+        for song in songs.iter() {
+            logical::get_song_by_song_id(*song)
+                .map(|x| self.selected_songs.push(x));
+        }
+        if self.window.is_visible() { self.populate_meta() }
+    }
     fn populate(&mut self) {
-        let playlist = match self.active_playlist.as_ref() {
+        let playlist_ref = match self.active_playlist.as_ref() {
             Some(x) => x,
             None => return,
         };
-        let playlist = playlist.read().unwrap();
+        let playlist = playlist_ref.read().unwrap();
         self.playlist_code.set_text(playlist.get_rule_code());
         self.check_playlist_code();
+        self.columns_model.clear();
         for column in playlist.get_columns() {
             self.columns_model.insert_with_values(None, &[0, 1],
                                                   &[&column.tag.to_value(),
                                                     &column.width.to_value()]);
         }
+    }
+    fn populate_meta(&mut self) {
     }
     fn check_playlist_code(&self) -> Option<String> {
         let value = self.playlist_code.get_text();

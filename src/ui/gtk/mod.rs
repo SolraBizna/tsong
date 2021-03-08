@@ -498,6 +498,11 @@ impl Controller {
             }
             return Inhibit(false)
         });
+        let controller = nu.clone();
+        this.playlist_view.get_selection().connect_changed(move |_| {
+            let _ = controller.try_borrow_mut()
+                .map(|mut x| x.update_selected_songs());
+        });
         this.activate_playlist_by_path(&TreePath::new_first());
         this.force_periodic();
         // okay, show the window and away we go
@@ -1244,6 +1249,18 @@ impl Controller {
     fn update_volume(&mut self, nu: f64) {
         prefs::set_volume((nu * 100.0).floor() as i32);
         self.volume_changed = true;
+    }
+    fn update_selected_songs(&mut self) {
+        let selection = self.playlist_view.get_selection();
+        let (selected_rows, model) = selection.get_selected_rows();
+        let selected_songs: Vec<SongID> =
+            selected_rows.into_iter()
+            .filter_map(|path| model.get_iter(&path))
+            .map(|iter| model.get_value(&iter, 0))
+            .filter_map(value_to_song_id)
+            .collect();
+        self.playlist_edit_controller.as_ref().unwrap().borrow_mut()
+            .set_selected_songs(&selected_songs[..]);
     }
     fn edit_playlist(&mut self, neu_code: String,
                      neu_columns: Vec<playlist::Column>) {
