@@ -683,6 +683,8 @@ impl Controller {
         if Some(&playlist_ref) == self.active_playlist.as_ref() {
             return
         }
+        self.playlist_edit_controller.as_ref().unwrap().borrow_mut()
+            .set_selected_songs(&[]);
         self.active_playlist = Some(playlist_ref.clone());
         let _ =
             self.playlist_edit_controller.as_ref().unwrap().try_borrow_mut()

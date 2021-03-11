@@ -304,9 +304,18 @@ impl LogicalSong {
         if self.duration != nu {
             db::update_song_duration(self.id, nu);
             self.user_metadata.insert("duration".to_owned(), format!("{}",nu));
-            // TODO: database update (metadata)
+            // Don't bother updating the database. This should only make a
+            // second or so difference, and will get updated at the other end
+            // anyway.
             self.duration = nu;
         }
+    }
+    /// Change the metadata of the song. This is a kinda expensive operation.
+    pub fn set_metadata(&mut self, mut new_meta: BTreeMap<String, String>) {
+        new_meta.insert("duration".to_owned(), format!("{}", self.duration));
+        new_meta.insert("song_id".to_owned(), format!("{}", self.id));
+        self.user_metadata = new_meta;
+        db::update_song_metadata(self.id, &self.user_metadata);
     }
 }
 
@@ -519,11 +528,17 @@ impl LogicalSong {
             let mut new_metadata = BTreeMap::new();
             let outmeta: Table = globals.raw_get("outmeta").anyhowify()?;
             for res in outmeta.pairs() {
-                let (k, v) = res.anyhowify()?;
-                new_metadata.insert(k, v);
+                let (k, v): (String, String) = res.anyhowify()?;
+                if v.len() > 0 {
+                    new_metadata.insert(k, v);
+                }
             }
             new_metadata.insert("duration".to_owned(),
                                 format!("{}", file.get_duration()));
+            if let Some(song_id) = song_id {
+                new_metadata.insert("song_id".to_owned(),
+                                    format!("{}", song_id));
+            }
             self.user_metadata = new_metadata;
             Ok(())
         });

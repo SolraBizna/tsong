@@ -1,3 +1,5 @@
+//! This module handles the physical database, i.e. the backing store for
+//! song, file, and playlist information.
 use crate::*;
 
 use std::{
@@ -39,7 +41,7 @@ pub fn open_database() -> anyhow::Result<()> {
             // eprintln!("Initialized database from schema.");
         },
         1 => {
-            // TODO: prompt user for upgrades?
+            // TODO: prompt user for upgrades? try to back up the file?
             eprintln!("Updating database from schema version 1.");
             database.execute_batch(include_str!("sql/update_1_to_2.sql"))?;
         },
@@ -303,6 +305,15 @@ pub fn update_song_physical_files(id: SongID, physical_files_in:&Vec<FileID>){
     dbtry(database.execute("UPDATE LogicalSongs SET physical_files = ? \
                             WHERE id = ?;",
                            params![physical_files, id.as_inner() as i64]));
+}
+
+pub fn update_song_metadata(id: SongID, metadata: &BTreeMap<String, String>) {
+    let metadata = json::to_string(metadata).unwrap();
+    let lock = DATABASE.lock();
+    let database = lock.as_ref().unwrap().as_ref().unwrap().borrow_mut();
+    dbtry(database.execute("UPDATE LogicalSongs SET user_metadata = ? \
+                            WHERE id = ?;",
+                           params![metadata, id.as_inner() as i64]));
 }
 
 pub fn update_song_duration(id: SongID, duration: u32) {

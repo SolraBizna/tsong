@@ -6,6 +6,7 @@ use gtk::{
     ButtonBoxBuilder, ButtonBoxStyle,
     Button, ButtonBuilder,
     CellRendererText,
+    CellRendererToggle,
     Entry, EntryBuilder,
     LabelBuilder,
     ListStore,
@@ -13,8 +14,10 @@ use gtk::{
     Orientation,
     PolicyType,
     ScrolledWindowBuilder,
+    SelectionMode,
     SeparatorBuilder,
-    TreeView, TreeViewBuilder, TreeViewColumn, TreePath,
+    TreeView, TreeViewBuilder, TreeViewColumn, TreeIter, TreePath,
+    TreeRowReference,
     Widget,
     Window, WindowBuilder, WindowType,
 };
@@ -22,6 +25,7 @@ use glib::{
     Type
 };
 use std::{
+    collections::{BTreeMap,HashMap},
     cell::RefCell,
     rc::{Rc,Weak},
 };
@@ -46,14 +50,52 @@ pub struct Controller {
     columns_view: TreeView,
     delete_column_button: Button,
     new_column_button: Button,
+    metadata_model: ListStore,
+    metadata_view: TreeView,
+    meta_key_cell: CellRendererText,
+    meta_key_column: TreeViewColumn,
+    meta_value_cell: CellRendererText,
+    meta_value_column: TreeViewColumn,
+    meta_modified_cell: CellRendererToggle,
+    /// The metadata values as they currently exist. `Some("...")` = all
+    /// selected songs have this value for this key. `None` = at least one song
+    /// has this key, but not all songs have the same value for it.
+    meta_orig: BTreeMap<String, Option<String>>,
+    /// Maps metadata keys that already existed to their renamed names. This is
+    /// applied BEFORE `meta_edits`.
+    meta_renames: BTreeMap<String, String>,
+    /// Maps metadata keys that may or may not exist to their new values. Non-
+    /// empty string = the value is set. Empty string = the key is deleted.
+    meta_edits: BTreeMap<String, String>,
+    delete_meta_button: Button,
+    reimport_meta_button: Button,
+    new_meta_button: Button,
     notebook: Notebook,
     columns_page: u32,
     meta_page: u32,
     playlist_code: Entry,
     apply_button: Button,
     cancel_button: Button,
+    revert_button: Button,
     ok_button: Button,
 }
+
+const META_COLUMN_TYPES: &[Type] = &[Type::String, Type::String, Type::U32,
+                                     Type::Bool, Type::String, Type::Bool];
+const META_KEY_COLUMN: u32 = 0;
+const META_VALUE_COLUMN: u32 = 1;
+const META_ROW_WEIGHT_COLUMN: u32 = 2;
+const META_MODIFIED_COLUMN: u32 = 3;
+const META_ORIG_KEY_COLUMN: u32 = 4;
+const META_DELETED_COLUMN: u32 = 5;
+
+// TODO: i18n
+const MULTIPLE_VALUES: &str = "(multiple values)";
+const DELETED_VALUE: &str = "(delete)";
+// Currently only used when a value is newly created and hasn't been filled in
+// yet. In future, may also be used for certain "privileged" keys like "title"
+// or "artist".
+const EMPTY_VALUE: &str = "";
 
 impl Controller {
     pub fn new(parent: Weak<RefCell<super::Controller>>,
@@ -91,7 +133,6 @@ impl Controller {
         let meta_box = BoxBuilder::new()
             .name("song_meta")
             .orientation(Orientation::Vertical).spacing(4).build();
-        meta_box.add(&LabelBuilder::new().label("TODO").build());
         let meta_page = notebook.append_page::<_, Widget>(&meta_box, None);
         notebook.set_tab_label_text(&meta_box, "Song Metadata");
         // The playlist code:
@@ -107,12 +148,13 @@ impl Controller {
         // The columns
         let columns_window = ScrolledWindowBuilder::new()
             .name("columns")
-            .hscrollbar_policy(PolicyType::Never)
+            .hscrollbar_policy(PolicyType::Automatic)
             .vscrollbar_policy(PolicyType::Automatic)
             .vexpand(true)
             .build();
         let columns_view = TreeViewBuilder::new()
             .headers_visible(false).reorderable(true).build();
+        columns_view.get_selection().set_mode(SelectionMode::Multiple);
         let column_tag_column = TreeViewColumn::new();
         let column_tag_cell = CellRendererText::new();
         column_tag_cell.set_property("editable", &true)
@@ -133,18 +175,84 @@ impl Controller {
         column_button_box.add(&new_column_button);
         columns_box.add(&column_button_box);
         icons.set_icon(&new_column_button, "tsong-add");
+        // The song metadata
+        let metadata_model = ListStore::new(META_COLUMN_TYPES);
+        let metadata_window = ScrolledWindowBuilder::new()
+            .name("metadata")
+            .hscrollbar_policy(PolicyType::Automatic)
+            .vscrollbar_policy(PolicyType::Automatic)
+            .vexpand(true)
+            .build();
+        let metadata_view = TreeViewBuilder::new()
+            .model(&metadata_model).headers_visible(true).reorderable(true)
+            .build();
+        metadata_view.get_selection().set_mode(SelectionMode::Multiple);
+        let tvc = TreeViewColumn::new();
+        let meta_modified_cell = CellRendererToggle::new();
+        meta_modified_cell.set_alignment(0.5, 0.5);
+        tvc.pack_start(&meta_modified_cell, true);
+        tvc.add_attribute(&meta_modified_cell, "active", META_MODIFIED_COLUMN as i32);
+        metadata_view.append_column(&tvc);
+        let meta_key_column = TreeViewColumn::new();
+        let meta_key_cell = CellRendererText::new();
+        meta_key_column.set_title("Key");
+        meta_key_column.set_fixed_width(100);
+        meta_key_column.set_resizable(true);
+        meta_key_cell.set_property("editable", &true)
+            .expect("couldn't make column cell editable");
+        meta_key_column.pack_start(&meta_key_cell, true);
+        meta_key_column.add_attribute(&meta_key_cell, "text",
+                                      META_KEY_COLUMN as i32);
+        meta_key_column.add_attribute(&meta_key_cell, "weight",
+                                      META_ROW_WEIGHT_COLUMN as i32);
+        meta_key_column.add_attribute(&meta_key_cell, "strikethrough",
+                                      META_DELETED_COLUMN as i32);
+        metadata_view.append_column(&meta_key_column);
+        let meta_value_column = TreeViewColumn::new();
+        let meta_value_cell = CellRendererText::new();
+        meta_value_column.set_title("Value");
+        meta_value_cell.set_property("editable", &true)
+            .expect("couldn't make column cell editable");
+        meta_value_column.pack_start(&meta_value_cell, true);
+        meta_value_column.add_attribute(&meta_value_cell, "text",
+                                        META_VALUE_COLUMN as i32);
+        meta_value_column.add_attribute(&meta_value_cell, "weight",
+                                        META_ROW_WEIGHT_COLUMN as i32);
+        metadata_view.append_column(&meta_value_column);
+        metadata_window.add(&metadata_view);
+        meta_box.add(&metadata_window);
+        let metadata_button_box = ButtonBoxBuilder::new()
+            .layout_style(ButtonBoxStyle::Expand)
+            .build();
+        let delete_meta_button = ButtonBuilder::new().build();
+        delete_meta_button.set_sensitive(false);
+        metadata_button_box.add(&delete_meta_button);
+        icons.set_icon(&delete_meta_button, "tsong-remove");
+        let reimport_meta_button = ButtonBuilder::new()
+            .label("Re-import").build();
+        reimport_meta_button.set_sensitive(false);
+        // hide the unimplemented button
+        //metadata_button_box.add(&reimport_meta_button);
+        let new_meta_button = ButtonBuilder::new().build();
+        new_meta_button.set_sensitive(false);
+        metadata_button_box.add(&new_meta_button);
+        meta_box.add(&metadata_button_box);
+        icons.set_icon(&new_meta_button, "tsong-add");
         // The buttons
         big_box.pack_start(&SeparatorBuilder::new()
                            .orientation(Orientation::Horizontal)
                            .build(), false, true, 0);
         let buttons_box = BoxBuilder::new()
-            .name("buttons")
+            .name("buttons").spacing(6)
             .orientation(Orientation::Horizontal).build();
         let button_box = ButtonBoxBuilder::new()
             .spacing(6).build();
         let cancel_button = ButtonBuilder::new()
             .label("_Cancel").use_underline(true).build();
         buttons_box.pack_start(&cancel_button, false, true, 0);
+        let revert_button = ButtonBuilder::new()
+            .label("Rever_t").use_underline(true).build();
+        buttons_box.pack_start(&revert_button, false, true, 0);
         let apply_button = ButtonBuilder::new()
             .label("_Apply").use_underline(true).build();
         button_box.pack_end(&apply_button, false, true, 0);
@@ -158,8 +266,15 @@ impl Controller {
             window, notebook, columns_page, meta_page,
             parent, columns_model: ListStore::new(&[Type::String, Type::U32]),
             delete_column_button, new_column_button, column_tag_column,
+            delete_meta_button, reimport_meta_button, new_meta_button,
             columns_view, apply_button, cancel_button, ok_button,
+            revert_button,
+            meta_key_cell, meta_value_cell, meta_key_column, meta_value_column,
+            meta_modified_cell,
+            meta_orig: BTreeMap::new(),
+            meta_edits: BTreeMap::new(), meta_renames: BTreeMap::new(),
             column_tag_cell, playlist_code, active_playlist: None,
+            metadata_model, metadata_view,
             selected_songs: Vec::new(), me: None
         }));
         let mut this = ret.borrow_mut();
@@ -185,6 +300,11 @@ impl Controller {
         this.cancel_button.connect_clicked(move |_| {
             let _ = controller.try_borrow_mut()
                 .map(|mut x| x.clicked_cancel());
+        });
+        let controller = ret.clone();
+        this.revert_button.connect_clicked(move |_| {
+            let _ = controller.try_borrow_mut()
+                .map(|mut x| x.populate());
         });
         let controller = ret.clone();
         this.ok_button.connect_clicked(move |_| {
@@ -213,6 +333,43 @@ impl Controller {
             delete_column_button.set_sensitive
                 (columns_view.get_cursor().0.is_some())
         });
+        let controller = ret.clone();
+        this.meta_key_cell.connect_edited(move |_, wo, nu| {
+            let _ = controller.try_borrow_mut()
+                .map(|mut x| x.edited_meta_key(wo, nu));
+        });
+        let controller = ret.clone();
+        this.meta_value_cell.connect_edited(move |_, wo, nu| {
+            let _ = controller.try_borrow_mut()
+                .map(|mut x| x.edited_meta_value(wo, nu));
+        });
+        let controller = ret.clone();
+        this.meta_modified_cell.connect_toggled(move |_, wo| {
+            let _ = controller.try_borrow_mut()
+                .map(|mut x| x.try_cancel_edit(wo));
+        });
+        let controller = ret.clone();
+        this.new_meta_button.connect_clicked(move |_| {
+            let _ = controller.try_borrow_mut()
+                .map(|mut x| x.clicked_new_meta());
+        });
+        let controller = ret.clone();
+        this.reimport_meta_button.connect_clicked(move |_| {
+            let _ = controller.try_borrow_mut()
+                .map(|mut x| x.populate_meta());
+        });
+        let controller = ret.clone();
+        this.delete_meta_button.connect_clicked(move |_| {
+            let _ = controller.try_borrow_mut()
+                .map(|mut x| x.clicked_delete_meta());
+        });
+        let delete_meta_button = this.delete_meta_button.clone();
+        this.metadata_view.connect_cursor_changed(move |metadata_view| {
+            // this doesn't reference Controller because we *want* it to update
+            // automatically, even when we caused the change
+            delete_meta_button.set_sensitive
+                (metadata_view.get_cursor().0.is_some())
+        });
         drop(this);
         ret
     }
@@ -238,6 +395,13 @@ impl Controller {
         let parent = self.parent.upgrade()?;
         parent.try_borrow_mut().ok()?
             .edit_playlist(playlist_code, columns);
+        if !self.meta_renames.is_empty() || !self.meta_edits.is_empty() {
+            for song_ref in self.selected_songs.iter() {
+                self.apply_meta_edits(song_ref);
+            }
+        }
+        // TODO: skip this step if we actually clicked "Save & Close"?
+        self.populate_meta();
         None
     }
     fn clicked_cancel(&mut self) {
@@ -251,7 +415,11 @@ impl Controller {
     }
     fn cleanup(&mut self) -> Option<()> {
         self.columns_model.clear();
+        self.metadata_model.clear();
         self.playlist_code.set_text("");
+        self.meta_orig.clear();
+        self.meta_renames.clear();
+        self.meta_edits.clear();
         let parent = self.parent.upgrade()?;
         parent.try_borrow_mut().ok()?.closed_playlist_edit();
         None
@@ -283,11 +451,13 @@ impl Controller {
     pub fn set_selected_songs(&mut self, songs: &[SongID]) {
         self.selected_songs.clear();
         self.selected_songs.reserve(songs.len());
-        for song in songs.iter() {
-            logical::get_song_by_song_id(*song)
+        for song_id in songs.iter() {
+            logical::get_song_by_song_id(*song_id)
                 .map(|x| self.selected_songs.push(x));
         }
         if self.window.is_visible() { self.populate_meta() }
+        self.reimport_meta_button.set_sensitive(self.selected_songs.len() !=0);
+        self.new_meta_button.set_sensitive(self.selected_songs.len() != 0);
     }
     fn populate(&mut self) {
         let playlist_ref = match self.active_playlist.as_ref() {
@@ -303,8 +473,69 @@ impl Controller {
                                                   &[&column.tag.to_value(),
                                                     &column.width.to_value()]);
         }
+        drop(playlist);
+        self.populate_meta();
     }
     fn populate_meta(&mut self) {
+        self.metadata_model.clear();
+        self.meta_orig.clear();
+        self.meta_renames.clear();
+        self.meta_edits.clear();
+        for song_ref in self.selected_songs.iter() {
+            let song = song_ref.read().unwrap();
+            let metadata = song.get_metadata();
+            for (key, value) in metadata.iter() {
+                if key == "duration" || key == "song_id" { continue }
+                // TODO: clean this up? decide to keep it?
+                if value.len() == 0 { continue }
+                use std::collections::btree_map::Entry;
+                match self.meta_orig.entry(key.to_owned()) {
+                    Entry::Vacant(x) => {
+                        x.insert(Some(value.to_owned()));
+                    },
+                    Entry::Occupied(x) => {
+                        let all_value = x.into_mut();
+                        match all_value {
+                            Some(x) if x == value => (),
+                            Some(_) => *all_value = None,
+                            None => (),
+                        }
+                    },
+                }
+            }
+        }
+        for song_ref in self.selected_songs.iter() {
+            let song = song_ref.read().unwrap();
+            let metadata = song.get_metadata();
+            for (key, value) in self.meta_orig.iter_mut() {
+                if !metadata.contains_key(key) {
+                    *value = None;
+                }
+            }
+        }
+        let mut sorted: Vec<&str> = self.meta_orig.keys().map(String::as_str).collect();
+        sorted.sort();
+        for key in sorted.iter() {
+            let iter = self.metadata_model.append();
+            self.metadata_model.set_value(&iter, META_KEY_COLUMN,
+                                          &key.to_value());
+            self.metadata_model.set_value(&iter, META_ORIG_KEY_COLUMN,
+                                          &key.to_value());
+            self.metadata_model.set_value(&iter,
+                                          META_ROW_WEIGHT_COLUMN,
+                                          &super::INACTIVE_WEIGHT
+                                          .to_value());
+            match self.meta_orig.get(*key) {
+                Some(Some(x)) => {
+                    self.metadata_model.set_value(&iter, META_VALUE_COLUMN,
+                                                  &x.to_value());
+                },
+                _ => {
+                    self.metadata_model.set_value(&iter, META_VALUE_COLUMN,
+                                                  &MULTIPLE_VALUES.to_value());
+                },
+            }
+        }
     }
     fn check_playlist_code(&self) -> Option<String> {
         let value = self.playlist_code.get_text();
@@ -325,9 +556,16 @@ impl Controller {
         }
     }
     fn clicked_delete_column(&mut self) -> Option<()> {
-        let wo = self.columns_view.get_cursor().0?;
-        self.columns_model.get_iter(&wo)
-            .map(|x| self.columns_model.remove(&x));
+        let selection = self.columns_view.get_selection();
+        let (wo_list, model) = selection.get_selected_rows();
+        let row_list: Vec<TreeRowReference> = wo_list.into_iter()
+            .filter_map(|x| TreeRowReference::new(&model, &x))
+            .collect();
+        for row in row_list.iter() {
+            self.columns_model.remove(&row.get_path()
+                                      .and_then(|x| model.get_iter(&x))
+                                      .unwrap());
+        }
         None
     }
     fn clicked_new_column(&mut self) {
@@ -348,6 +586,289 @@ impl Controller {
     fn edited_column_tag(&self, wo: TreePath, nu: &str) -> Option<()> {
         let iter = self.columns_model.get_iter(&wo)?;
         self.columns_model.set_value(&iter, 0, &nu.to_value());
+        None
+    }
+    fn update_modified_for_row(&mut self, iter: &TreeIter) -> Option<bool> {
+        let orig_key: String
+            = self.metadata_model.get_value(&iter, META_ORIG_KEY_COLUMN as i32)
+            .get().ok()??; // if None, we didn't need to update this
+        let modified = if self.meta_renames.get(&orig_key).is_some() {
+            true
+        }
+        else {
+            let orig_value = self.meta_orig.get(&orig_key).unwrap();
+            let neo_value = self.meta_edits.get(&orig_key);
+            match (orig_value, neo_value) {
+                // value is not being modified
+                (_, None) => false,
+                // originally had multiple values, now either has a single
+                // value or is deleted
+                (None, Some(_)) => true,
+                // originally had a single value, now may have a different
+                // value
+                (Some(x), Some(y)) => x != y,
+            }
+        };
+        self.metadata_model.set_value(&iter, META_MODIFIED_COLUMN,
+                                      &modified.to_value());
+        self.metadata_model.set_value(&iter, META_ROW_WEIGHT_COLUMN,
+                                      &if modified { super::INACTIVE_WEIGHT }
+                                      else { super::INACTIVE_WEIGHT }
+                                      .to_value());
+        Some(modified)
+    }
+    /// Find out if there's already another metadata key with that index (in
+    /// the edited form)
+    fn already_has_meta_key(&self, key: &str, skip: Option<&TreePath>)
+    -> bool {
+        let mut dupe = false;
+        self.metadata_model.foreach(|model, path, iter| {
+            if Some(path) == skip { return false }
+            let that_key: String =
+                model.get_value(&iter, META_KEY_COLUMN as i32)
+                .get().ok().unwrap().unwrap();
+            if that_key == key {
+                dupe = true;
+                return true
+            }
+            false
+        });
+        dupe
+    }
+    fn edited_meta_key(&mut self, wo: TreePath, nu: &str) -> Option<()> {
+        let iter = self.metadata_model.get_iter(&wo)?;
+        let prev_key: Option<String>
+            = self.metadata_model.get_value(&iter, META_KEY_COLUMN as i32)
+            .get().ok()?;
+        // Reject the edit if the name is invalid.
+        if nu == "" || nu == "duration" || nu == "song_id" {
+            // (If the edit is rejected, and this is a newly-created row that
+            // has not yet had a valid value, just delete it.)
+            if prev_key.is_some() {
+                self.metadata_model.remove(&iter);
+            }
+            return None
+        }
+        let dupe = self.already_has_meta_key(&nu, Some(&wo));
+        // If there is already another key with the same name, reject the edit.
+        if dupe {
+            // (see above)
+            if prev_key.is_some() {
+                self.metadata_model.remove(&iter);
+            }
+            return None
+        }
+        // If there's not, let's rename it!
+        let orig_key: Option<String>
+            = self.metadata_model.get_value(&iter, META_ORIG_KEY_COLUMN as i32)
+            .get().ok()?;
+        if let Some(orig_key) = orig_key {
+            let modified = nu != orig_key;
+            if modified {
+                self.meta_renames.insert(orig_key, nu.to_owned());
+                // definitely modified
+                self.metadata_model.set_value(&iter, META_MODIFIED_COLUMN,
+                                              &true.to_value());
+                self.metadata_model.set_value(&iter, META_ROW_WEIGHT_COLUMN,
+                                              &super::ACTIVE_WEIGHT
+                                              .to_value());
+            }
+            else {
+                self.meta_renames.remove(&orig_key);
+                // maybe modified
+                self.update_modified_for_row(&iter);
+            }
+        }
+        else {
+            // we don't have an original key, so we should not touch
+            // `meta_renames`, and we need not update the modified flag
+        }
+        self.metadata_model.set_value(&iter, META_KEY_COLUMN, &nu.to_value());
+        if let Some(prev_key) = prev_key.as_ref() {
+            let prev_edit = self.meta_edits.remove(prev_key);
+            if let Some(prev_edit) = prev_edit {
+                self.meta_edits.insert(nu.to_owned(), prev_edit);
+            }
+        }
+        // as a convenience, if this is a newly created key, try going directly
+        // to editing the value
+        // ...or not (this triggers a GTK+ assertion failure)
+        /*
+        if prev_key.is_none() {
+            self.metadata_view
+                .set_cursor_on_cell(&wo,
+                                    Some(&self.meta_value_column),
+                                    Some(&self.meta_value_cell),
+                                    true);
+        }
+         */
+        None
+    }
+    fn edited_meta_value(&mut self, wo: TreePath, nu: &str) -> Option<()> {
+        let iter = self.metadata_model.get_iter(&wo)?;
+        let key: String
+            = self.metadata_model.get_value(&iter, META_KEY_COLUMN as i32)
+            .get().ok()??;
+        self.meta_edits.insert(key, nu.to_owned());
+        if nu == "" {
+            self.metadata_model.set_value(&iter,
+                                          META_VALUE_COLUMN,
+                                          &DELETED_VALUE.to_value());
+            self.metadata_model.set_value(&iter,
+                                          META_MODIFIED_COLUMN,
+                                          &true.to_value());
+            self.metadata_model.set_value(&iter,
+                                          META_DELETED_COLUMN,
+                                          &false.to_value());
+            self.metadata_model.set_value(&iter, META_ROW_WEIGHT_COLUMN,
+                                          &super::ACTIVE_WEIGHT
+                                          .to_value());
+        }
+        else {
+            self.metadata_model.set_value(&iter,
+                                          META_VALUE_COLUMN,
+                                          &nu.to_value());
+            self.metadata_model.set_value(&iter,
+                                          META_DELETED_COLUMN,
+                                          &false.to_value());
+            self.update_modified_for_row(&iter);
+        }
+        None
+    }
+    fn try_cancel_edit(&mut self, wo: TreePath) -> Option<()> {
+        let iter = self.metadata_model.get_iter(&wo)?;
+        let key: String
+            = self.metadata_model.get_value(&iter, META_KEY_COLUMN as i32)
+            .get().ok()??;
+        let orig_key: Option<String>
+            = self.metadata_model.get_value(&iter, META_ORIG_KEY_COLUMN as i32)
+            .get().ok()?;
+        let orig_key = match orig_key {
+            Some(orig_key) => orig_key,
+            None => {
+                // No original to restore. Delete the whole darn row!
+                self.metadata_model.remove(&iter);
+                self.meta_edits.remove(&key);
+                return None
+            },
+        };
+        let dupe = self.already_has_meta_key(&orig_key, Some(&wo));
+        if dupe { return None }
+        self.meta_edits.remove(&key);
+        self.meta_renames.remove(&orig_key);
+        self.metadata_model.set_value(&iter, META_KEY_COLUMN,
+                                      &orig_key.to_value());
+        match self.meta_orig.get(&orig_key) {
+            Some(Some(x)) => {
+                self.metadata_model.set_value(&iter, META_VALUE_COLUMN,
+                                              &x.to_value());
+            },
+            _ => {
+                self.metadata_model.set_value(&iter, META_VALUE_COLUMN,
+                                              &MULTIPLE_VALUES.to_value());
+            },
+        }
+        self.metadata_model.set_value(&iter, META_MODIFIED_COLUMN,
+                                      &false.to_value());
+        self.metadata_model.set_value(&iter, META_DELETED_COLUMN,
+                                      &false.to_value());
+        self.metadata_model.set_value(&iter, META_ROW_WEIGHT_COLUMN,
+                                      &super::INACTIVE_WEIGHT
+                                      .to_value());
+        None
+    }
+    fn apply_meta_edits(&self, song_ref: &LogicalSongRef) {
+        let mut dirty = false;
+        let mut song = song_ref.write().unwrap();
+        let mut metadata = song.get_metadata().clone();
+        // We have to put all the renamed values in a separate hat before we
+        // apply them, because otherwise there might be some clobbering.
+        let mut renamed = HashMap::with_capacity(self.meta_renames.len());
+        for (from, to) in self.meta_renames.iter() {
+            if let Some(value) = metadata.remove(from) {
+                dirty = true;
+                renamed.insert(to.clone(), value);
+            }
+        }
+        // Okay, now put all the renamed things back in...
+        for (key, value) in renamed.into_iter() {
+            metadata.insert(key, value);
+        }
+        // And then apply all edits.
+        for (key, value) in self.meta_edits.iter() {
+            if metadata.get(key) != Some(&value) {
+                metadata.insert(key.clone(), value.clone());
+                dirty = true;
+            }
+        }
+        // Okay!
+        if dirty {
+            song.set_metadata(metadata);
+        }
+    }
+    fn clicked_new_meta(&mut self) {
+        let it = self.metadata_model.insert_with_values
+            (None, &[META_VALUE_COLUMN, META_ROW_WEIGHT_COLUMN,
+                     META_MODIFIED_COLUMN],
+             &[&EMPTY_VALUE.to_value(), &super::ACTIVE_WEIGHT.to_value(),
+               &true.to_value()]);
+        match self.metadata_model.get_path(&it) {
+            Some(wo) =>
+                self.metadata_view
+                .set_cursor_on_cell(&wo,
+                                    Some(&self.meta_key_column),
+                                    Some(&self.meta_key_cell),
+                                    true),
+            _ => (),
+        }
+    }
+    fn clicked_delete_meta(&mut self) -> Option<()> {
+        let selection = self.metadata_view.get_selection();
+        let (wo_list, model) = selection.get_selected_rows();
+        let model: &ListStore = model.downcast_ref().unwrap();
+        let row_list: Vec<TreeRowReference> = wo_list.into_iter()
+            .filter_map(|x| TreeRowReference::new(model, &x))
+            .collect();
+        for row in row_list.iter() {
+            let path = match row.get_path() {
+                Some(x) => x,
+                None => continue,
+            };
+            let iter = match model.get_iter(&path) {
+                Some(x) => x,
+                None => continue,
+            };
+            let orig_key: Option<String> = self.metadata_model
+                .get_value(&iter, META_ORIG_KEY_COLUMN as i32)
+                .get().ok()?;
+            let current_key: Option<String> = self.metadata_model
+                .get_value(&iter, META_KEY_COLUMN as i32)
+                .get().ok()?;
+            match (orig_key, current_key) {
+                (Some(_orig_key), Some(current_key)) => {
+                    self.meta_edits.insert(current_key, String::new());
+                    model.set_value(&iter, META_VALUE_COLUMN,
+                                    &DELETED_VALUE.to_value());
+                    model.set_value(&iter, META_DELETED_COLUMN,
+                                    &true.to_value());
+                    model.set_value(&iter, META_MODIFIED_COLUMN,
+                                    &true.to_value());
+                    self.metadata_model.set_value(&iter,
+                                                  META_ROW_WEIGHT_COLUMN,
+                                                  &super::ACTIVE_WEIGHT
+                                                  .to_value());
+                },
+                (orig_key, current_key) => {
+                    if let Some(orig_key) = orig_key {
+                        self.meta_renames.remove(&orig_key);
+                    }
+                    if let Some(current_key) = current_key {
+                        self.meta_edits.remove(&current_key);
+                    }
+                    self.metadata_model.remove(&iter);
+                }
+            }
+        }
         None
     }
 }
