@@ -39,16 +39,18 @@ pub struct Icons {
     buttons: Vec<(Button, &'static str)>,
 }
 
-fn get_icon_image(color: &RGBA, name: &str) -> Option<Image> {
+fn get_icon_image(scale_factor: i32, color: &RGBA, name: &str)
+-> Option<Image> {
     let icon_theme = IconTheme::get_default()?;
-    let icon = icon_theme.lookup_icon(name, 24,
+    let icon = icon_theme.lookup_icon(name, 24 * scale_factor,
                                       IconLookupFlags::FORCE_SYMBOLIC)?;
     let image = icon.load_symbolic(color, None, None, None).ok()?.0;
     Some(Image::from_pixbuf(Some(&image)))
 }
 
-fn get_icon(color: &RGBA, name: &str, fallback: &'static str) -> IconOrFallback {
-    match get_icon_image(color, name) {
+fn get_icon(scale_factor: i32, color: &RGBA, name: &str,
+            fallback: &'static str) -> IconOrFallback {
+    match get_icon_image(scale_factor, color, name) {
         Some(x) => IconOrFallback::Icon(x),
         None => IconOrFallback::Fallback(fallback),
     }
@@ -70,12 +72,12 @@ fn set_image(button: &Button, icon: &IconOrFallback) {
 }
 
 impl Icons {
-    pub fn reload_icons(&mut self, color: &RGBA) {
+    pub fn reload_icons(&mut self, scale_factor: i32, color: &RGBA) {
         // TODO: reload icons when theme is changed
         self.icons.clear();
         for (name, fallback) in ICONS {
             self.icons.insert(name.to_string(),
-                              get_icon(color, name, fallback));
+                              get_icon(scale_factor, color, name, fallback));
         }
         for (button, icon) in self.buttons.iter() {
             let got = self.icons.get(*icon)

@@ -1257,9 +1257,10 @@ impl Controller {
                  .set_rule_code_and_columns(neu_code, neu_columns));
     }
     fn reload_icons(&mut self) {
+        let scale_factor = self.settings_button.get_scale_factor();
         let color = self.settings_button.get_style_context()
             .get_color(StateFlags::NORMAL);
-        self.icons.reload_icons(&color);
+        self.icons.reload_icons(scale_factor, &color);
     }
     fn update_playlist_view(&self, playlist: RwLockReadGuard<Playlist>,
                             mut changed_songs: HashSet<SongID>)
