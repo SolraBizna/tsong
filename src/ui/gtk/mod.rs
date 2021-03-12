@@ -1,4 +1,5 @@
 use crate::*;
+use fuse_rust::Fuse;
 use gtk::{
     prelude::*,
     Align,
@@ -28,7 +29,8 @@ use gtk::{
     Spinner, SpinnerBuilder,
     StyleContext,
     ToggleButton, ToggleButtonBuilder,
-    TreeIter, TreePath, TreeStore, TreeRowReference, TreeModelFlags,
+    TreeIter, TreePath, TreeStore, TreeRowReference,
+    TreeModel, TreeModelFlags,
     TreeView, TreeViewBuilder, TreeViewColumn,
     VolumeButton, VolumeButtonBuilder,
     Widget,
@@ -181,6 +183,7 @@ impl Controller {
             .build();
         let playlists_view = TreeViewBuilder::new()
             .headers_visible(false).reorderable(true).build();
+        playlists_view.set_search_column(1);
         playlists_window.add(&playlists_view);
         playlists_box.add(&playlists_window);
         rollup_grid.attach(&playlists_box, 0, 0, 1, 1);
@@ -226,6 +229,7 @@ impl Controller {
             .build();
         let playlist_view = TreeViewBuilder::new().expand(true)
             .headers_visible(true).build();
+        playlist_view.set_search_equal_func(playlist_search_func);
         playlist_view.get_selection().set_mode(SelectionMode::Multiple);
         playlist_window.add(&playlist_view);
         playlist_itself_box.add(&playlist_window);
@@ -1596,4 +1600,25 @@ fn set_icon<B: IsA<Button>>(button: &B, icon: &'static str) {
                                                  IconSize::LargeToolbar)));
     button.set_label("");
     let _ = button.set_property("always-show-image", &true);
+}
+
+fn playlist_search_func(model: &TreeModel, _: i32, search_string: &str,
+                        iter: &TreeIter) -> bool {
+    let fuse = Fuse::default();
+    let search_pattern = fuse.create_pattern(search_string);
+    let num_columns = model.get_n_columns();
+    for n in 3..num_columns {
+        let value: Option<String> = model.get_value(&iter, n).get().unwrap();
+        let value = match value {
+            Some(x) => x,
+            None => continue,
+        };
+        match fuse.search(search_pattern.as_ref(), &value) {
+            Some(result) if result.score < 0.2 => {
+                return false
+            },
+            _ => (),
+        }
+    }
+    true
 }

@@ -224,6 +224,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "crossbeam-utils"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7e9d99fa91428effe99c5c6d4634cdeba32b8cf784fc428a2a687f61a952c49"
+dependencies = [
+ "autocfg",
+ "cfg-if 1.0.0",
+ "lazy_static",
+]
+
+[[package]]
 name = "dbus"
 version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -300,6 +311,15 @@ dependencies = [
  "crc32fast",
  "libc",
  "miniz_oxide",
+]
+
+[[package]]
+name = "fuse-rust"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00df1351ccd6b34c2f67658bd4524b677e30f7269a6de44b038ec20211853e5e"
+dependencies = [
+ "crossbeam-utils",
 ]
 
 [[package]]
@@ -1278,6 +1298,7 @@ dependencies = [
  "anyhow",
  "arrayref",
  "ffmpeg-dev",
+ "fuse-rust",
  "gdk",
  "gio",
  "glib",
