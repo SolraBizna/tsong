@@ -104,12 +104,15 @@ pub struct Controller {
 
 impl Controller {
     pub fn new(application: &Application) -> Rc<RefCell<Controller>> {
-        if let Some(path) = std::env::vars().find_map(|(x,y)| {
-            if x == "TSONG_ICON_PATH" { Some(y) } else { None }
-        }) {
-            let icon_theme = IconTheme::get_default().unwrap();
+        let icon_theme = IconTheme::get_default().unwrap();
+        if let Ok(path) = std::env::var("TSONG_ICON_PATH") {
             icon_theme.append_search_path(&path);
         }
+        let resource_bytes = glib::Bytes::from_static
+            (include_bytes!("tsong.gresource"));
+        let resource = gio::Resource::from_data(&resource_bytes).unwrap();
+        gio::resources_register(&resource);
+        icon_theme.add_resource_path("/name/bizna/tsong/icons");
         let window = ApplicationWindow::new(application);
         window.set_title("Tsong");
         window.set_default_size(640, 460);

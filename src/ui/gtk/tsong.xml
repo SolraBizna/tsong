@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/name/bizna/tsong">
+    <file compressed="true">icons/tsong-add-symbolic.svg</file>
+    <file compressed="true">icons/tsong-loop-one-symbolic.svg</file>
+    <file compressed="true">icons/tsong-loop-symbolic.svg</file>
+    <file compressed="true">icons/tsong-next-symbolic.svg</file>
+    <file compressed="true">icons/tsong-pause-symbolic.svg</file>
+    <file compressed="true">icons/tsong-play-symbolic.svg</file>
+    <file compressed="true">icons/tsong-prev-symbolic.svg</file>
+    <file compressed="true">icons/tsong-remove-symbolic.svg</file>
+    <file compressed="true">icons/tsong-rolldown-symbolic.svg</file>
+    <file compressed="true">icons/tsong-rollup-symbolic.svg</file>
+    <file compressed="true">icons/tsong-shuffle-symbolic.svg</file>
+  </gresource>
+</gresources>
