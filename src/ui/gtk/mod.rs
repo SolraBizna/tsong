@@ -47,8 +47,12 @@ use glib::{
 use gio::prelude::*;
 use std::{
     cell::RefCell,
+    collections::HashSet,
     rc::{Rc,Weak},
+    sync::{RwLockReadGuard, mpsc},
 };
+
+use anyhow::anyhow;
 
 mod settings;
 mod playlist_edit;
@@ -99,6 +103,7 @@ pub struct Controller {
     periodic_timer: Option<SourceId>,
     volume_changed: bool,
     me: Option<Weak<RefCell<Controller>>>,
+    song_meta_update_rx: mpsc::Receiver<SongID>,
 }
 
 impl Controller {
@@ -266,6 +271,7 @@ impl Controller {
         icons.set_icon(&playmode_button, "tsong-loop");
         icons.set_icon(&new_playlist_button, "tsong-add");
         icons.set_icon(&delete_playlist_button, "tsong-remove");
+        let (song_meta_update_tx, song_meta_update_rx) = mpsc::channel();
         let nu = Rc::new(RefCell::new(Controller {
             rollup_button, settings_button, prev_button, next_button,
             shuffle_button, playmode_button, play_button, volume_button,
@@ -281,6 +287,7 @@ impl Controller {
             last_built_playlist: None, me: None, settings_controller: None,
             playlist_edit_controller: None, rolled_down_height: 400,
             periodic_timer: None, volume_changed: false, icons,
+            song_meta_update_rx,
         }));
         // Throughout this application, we make use of a hack.
         // Each signal that depends on a Controller starts with an attempt to
@@ -290,7 +297,7 @@ impl Controller {
         let mut this = nu.borrow_mut();
         this.me = Some(Rc::downgrade(&nu));
         this.settings_controller = Some(settings::Controller::new(Rc::downgrade(&nu), &mut this.icons));
-        this.playlist_edit_controller = Some(playlist_edit::Controller::new(Rc::downgrade(&nu), &mut this.icons));
+        this.playlist_edit_controller = Some(playlist_edit::Controller::new(Rc::downgrade(&nu), &mut this.icons, song_meta_update_tx));
         this.remote = Some(Remote::new(Rc::downgrade(&nu)));
         this.delete_playlist_button
             .set_sensitive(this.delete_playlist_button_should_be_sensitive());
@@ -465,8 +472,8 @@ impl Controller {
         });
         let controller = nu.clone();
         this.playlist_view.get_selection().connect_changed(move |_| {
-            let _ = controller.try_borrow_mut()
-                .map(|mut x| x.update_selected_songs());
+            let _ = controller.try_borrow()
+                .map(|x| x.update_selected_songs());
         });
         this.activate_playlist_by_path(&TreePath::new_first());
         this.force_periodic();
@@ -475,7 +482,11 @@ impl Controller {
         drop(this);
         nu
     }
-    fn rebuild_playlist_view(&mut self) {
+    pub fn rebuild_playlist_view(&mut self) {
+        // Discard any song metadata updates that are queued, since we're
+        // rebuilding the whole view.
+        while let Ok(_) = self.song_meta_update_rx.try_recv() {}
+        // TODO: songs_to_select instead of song_to_select
         let song_to_select = match self.last_built_playlist.as_ref() {
             Some(playlist) if Some(playlist) == self.active_playlist.as_ref()
                 => {
@@ -626,20 +637,8 @@ impl Controller {
             playlist_model.set_value(&new_row, 2, &song_index.to_value());
             song_index += 1;
             total_duration = total_duration.saturating_add(song.get_duration());
-            let metadata = song.get_metadata();
-            let mut column_index: u32 = 3;
-            for column in playlist.get_columns() {
-                let s = if column.tag == "duration" {
-                    pretty_duration(song.get_duration()).to_value()
-                }
-                else {
-                    metadata.get(&column.tag).map(String::as_str)
-                        .and_then(|x| if x.len() == 0 { None } else { Some(x)})
-                        .to_value()
-                };
-                playlist_model.set_value(&new_row, column_index, &s);
-                column_index += 1;
-            }
+            self.emplace_metadata(&playlist_model, &new_row,
+                                  playlist.get_columns(), &*song);
         }
         self.playlist_view.set_model(Some(&playlist_model));
         self.playlist_model = Some(playlist_model);
@@ -663,6 +662,7 @@ impl Controller {
         }
         drop(playlist);
         self.update_playmode_button();
+        self.update_selected_songs();
     }
     fn activate_playlist_by_path(&mut self, wo: &TreePath) {
         let id = match self.playlists_model.get_iter(wo)
@@ -701,7 +701,7 @@ impl Controller {
     fn periodic(&mut self, forced: bool) {
         self.update_view();
         self.update_scan_status();
-        self.maybe_rebuild_playlist();
+        self.maybe_update_playlist();
         if self.volume_changed {
             match prefs::write() {
                 Ok(_) => (),
@@ -884,6 +884,9 @@ impl Controller {
             self.remote.as_ref().unwrap().set_now_playing(active_song.as_ref());
         }
     }
+    fn force_spinner_start(&self) {
+        self.scan_spinner.start();
+    }
     fn update_scan_status(&mut self) {
         let scan_in_progess = match self.scan_thread.get_result_nonblocking() {
             Err(x) => {
@@ -905,26 +908,87 @@ impl Controller {
                 true
             },
         };
-        if scan_in_progess {
+        if scan_in_progess
+        || self.playlist_edit_controller.as_ref().unwrap().borrow()
+            .script_is_in_progress() {
             self.scan_spinner.start();
         }
         else {
             self.scan_spinner.stop();
         }
     }
-    fn maybe_rebuild_playlist(&mut self) {
-        let playlist = match self.active_playlist.as_ref() {
+    fn maybe_update_playlist(&mut self) {
+        let playlist_ref = match self.active_playlist.as_ref() {
             Some(x) => x,
             None => return,
         };
-        let playlist = match playlist.sheepishly_maybe_refreshed() {
+        let playlist = match playlist_ref.sheepishly_maybe_refreshed() {
             Some(x) => x,
             _ => return,
         };
         if playlist.get_playlist_generation() == self.playlist_generation {
-            return
+            drop(playlist);
+            // okay, but maybe some songs in it got changed?
+            let changed_songs: Vec<SongID>
+                = self.song_meta_update_rx.try_iter().collect();
+            if changed_songs.is_empty() {
+                return
+            }
+            else {
+                // Upgrade to a write lock, because we might want to resort the
+                // playlist and we won't want to repeat our checks.
+                let mut playlist = playlist_ref.write().unwrap();
+                if playlist.get_playlist_generation()
+                == self.playlist_generation {
+                    let changed_song_set: HashSet<SongID>
+                        = changed_songs.iter().map(|x| *x).collect();
+                    let songs_in_playlist = playlist.get_songs();
+                    let mut changed_songs_in_playlist: HashSet<SongID>
+                        = HashSet::with_capacity(songs_in_playlist.len()
+                                                 .min(changed_songs.len()));
+                    for song_ref in songs_in_playlist {
+                        let song_id = song_ref.read().unwrap().get_id();
+                        if changed_song_set.contains(&song_id) {
+                            changed_songs_in_playlist.insert(song_id);
+                        }
+                    }
+                    if changed_songs_in_playlist.len() == 0 {
+                        // nope! nothing to do
+                        return
+                    }
+                    // Okay, so at this point we know that the set of songs
+                    // that are in the playlist hasn't changed. But maybe, if
+                    // it's not shuffled, some metadata has changed that
+                    // affected the sort?
+                    let playlist_changed = if playlist.is_shuffled() { false }
+                    else { playlist.resort() };
+                    if !playlist_changed {
+                        // The sort didn't change, but some of the songs at
+                        // least did. Update their metadata in-place.
+                        drop(playlist);
+                        let playlist = playlist_ref.read().unwrap();
+                        // ...after one last check that the playlist hasn't
+                        // been updated out from under us.
+                        if playlist.get_playlist_generation()
+                        == self.playlist_generation {
+                            // ...and making sure the in-place update goes
+                            // smoothly...
+                            match self.update_playlist_view
+                                (playlist, changed_songs_in_playlist) {
+                                    Ok(_) => return,
+                                    Err(x) => eprintln!("Warning: \
+                                                         Error while doing in-\
+                                                         place metadata \
+                                                         update: {}", x),
+                                }
+                        }
+                    }
+                }
+            }
         }
-        drop(playlist);
+        else {
+            drop(playlist);
+        }
         self.rebuild_playlist_view();
     }
     fn clicked_play(&mut self) {
@@ -1174,7 +1238,7 @@ impl Controller {
         prefs::set_volume((nu * 100.0).floor() as i32);
         self.volume_changed = true;
     }
-    fn update_selected_songs(&mut self) {
+    fn update_selected_songs(&self) {
         let selection = self.playlist_view.get_selection();
         let (selected_rows, model) = selection.get_selected_rows();
         let selected_songs: Vec<SongID> =
@@ -1196,6 +1260,52 @@ impl Controller {
         let color = self.settings_button.get_style_context()
             .get_color(StateFlags::NORMAL);
         self.icons.reload_icons(&color);
+    }
+    fn update_playlist_view(&self, playlist: RwLockReadGuard<Playlist>,
+                            mut changed_songs: HashSet<SongID>)
+    -> anyhow::Result<()> {
+        let playlist_model = self.playlist_model.as_ref().unwrap();
+        let mut did_ok = true;
+        playlist_model.foreach(|model, _wo, iter| {
+            let id = value_to_song_id(model.get_value(iter, 0)).unwrap();
+            if changed_songs.contains(&id) {
+                changed_songs.remove(&id);
+                if let Some(song_ref) = logical::get_song_by_song_id(id) {
+                    self.emplace_metadata(playlist_model, iter,
+                                          playlist.get_columns(),
+                                          &song_ref.read().unwrap());
+                }
+                else {
+                    did_ok = false;
+                    return true
+                }
+            }
+            changed_songs.is_empty()
+        });
+        match did_ok {
+            true => {
+                self.update_selected_songs();
+                Ok(())
+            },
+            false => Err(anyhow!("A song got deleted out from under us?")),
+        }
+    }
+    fn emplace_metadata(&self, playlist_model: &ListStore, iter: &TreeIter,
+                        columns: &[playlist::Column], song: &LogicalSong) {
+        let metadata = song.get_metadata();
+        let mut column_index: u32 = 3;
+        for column in columns {
+            let s = if column.tag == "duration" {
+                pretty_duration(song.get_duration()).to_value()
+            }
+            else {
+                metadata.get(&column.tag).map(String::as_str)
+                    .and_then(|x| if x.len() == 0 { None } else { Some(x)})
+                    .to_value()
+            };
+            playlist_model.set_value(&iter, column_index, &s);
+            column_index += 1;
+        }
     }
 }
 

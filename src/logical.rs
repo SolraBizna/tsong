@@ -20,6 +20,8 @@ use std::{
 };
 
 pub type LogicalSongRef = Reference<LogicalSong>;
+const NO_SONG: u64 = 0;
+const NO_SONG_ID: SongID = SongID { inner: NO_SONG };
 
 /// A song ID is a non-zero ID, unique *within the database*, that identifies a
 /// particular logical song.
@@ -85,9 +87,12 @@ impl SimilarityRec {
                metadata: &BTreeMap<String, String>) -> SimilarityRec {
         SimilarityRec {
             filename, duration,
-            title: metadata.get("title").map(|x| x.as_str()).unwrap_or("").to_owned(),
-            artist: metadata.get("artist").map(|x| x.as_str()).unwrap_or("").to_owned(),
-            album: metadata.get("album").map(|x| x.as_str()).unwrap_or("").to_owned(),
+            title: metadata.get("title").map(String::as_str)
+                .unwrap_or("").to_owned(),
+            artist: metadata.get("artist").map(String::as_str)
+                .unwrap_or("").to_owned(),
+            album: metadata.get("album").map(String::as_str)
+                .unwrap_or("").to_owned(),
         }
     }
 }
@@ -127,12 +132,15 @@ lazy_static! {
     static ref SONGS_BY_P_FILENAME
         : RwLock<HashMap<String,Vec<LogicalSongRef>>>
         = RwLock::new(HashMap::new());
+    /// Songs indexed by PHYSICAL TITLE, not the user's metadata title!
     static ref SONGS_BY_P_TITLE
         : RwLock<HashMap<String,Vec<LogicalSongRef>>>
         = RwLock::new(HashMap::new());
+    /// Songs indexed by PHYSICAL ARTIST, not the user's metadata artist!
     static ref SONGS_BY_P_ARTIST
         : RwLock<HashMap<String,Vec<LogicalSongRef>>>
         = RwLock::new(HashMap::new());
+    /// Songs indexed by PHYSICAL ALBUM, not the user's metadata album!
     static ref SONGS_BY_P_ALBUM
         : RwLock<HashMap<String,Vec<LogicalSongRef>>>
         = RwLock::new(HashMap::new());
@@ -239,6 +247,7 @@ pub fn incorporate_physical(file_ref: PhysicalFileRef) {
         let song_id = db::add_song(&new_song.user_metadata,
                                    &new_song.physical_files,
                                    new_song.duration).unwrap(); // TODO: errors
+        assert_ne!(song_id, NO_SONG_ID);
         new_song.id = song_id;
         eprintln!("New song! {:?}", new_song.user_metadata.get("title"));
         drop(new_song);
@@ -295,6 +304,10 @@ impl LogicalSong {
         }
         None
     }
+    /// Gets the list of `PhysicalFile` IDs that this song is backed by.
+    pub fn get_physical_files(&self) -> &[FileID] {
+        &self.physical_files[..]
+    }
     /// Returns the (estimated) duration of the song, in seconds.
     pub fn get_duration(&self) -> u32 { self.duration }
     /// Updates the duration of the song. This can happen if different physical
@@ -311,11 +324,20 @@ impl LogicalSong {
         }
     }
     /// Change the metadata of the song. This is a kinda expensive operation.
-    pub fn set_metadata(&mut self, mut new_meta: BTreeMap<String, String>) {
+    ///
+    /// Returns true if the metadata actually changed, and therefore the data­
+    /// base got updated.
+    pub fn set_metadata(&mut self, mut new_meta: BTreeMap<String, String>)
+    -> bool {
         new_meta.insert("duration".to_owned(), format!("{}", self.duration));
         new_meta.insert("song_id".to_owned(), format!("{}", self.id));
-        self.user_metadata = new_meta;
-        db::update_song_metadata(self.id, &self.user_metadata);
+        if self.user_metadata != new_meta {
+            self.user_metadata = new_meta;
+            db::update_song_metadata(self.id, &self.user_metadata);
+            GENERATION.bump();
+            true
+        }
+        else { false }
     }
 }
 
@@ -364,6 +386,7 @@ impl LogicalSongRef {
 /// Called by the database as songs are loaded.
 pub fn add_song_from_db(id: SongID, user_metadata: BTreeMap<String, String>,
                         physical_files: Vec<FileID>, duration: u32) {
+    assert_ne!(id, NO_SONG_ID);
     let neu_ref = LogicalSongRef::new(LogicalSong {
         similarity_recs: Vec::new(),
         id, user_metadata, physical_files, duration,
@@ -486,9 +509,12 @@ fn load_import_script(lua: &Lua) -> anyhow::Result<Function> {
 }
 
 impl LogicalSong {
-    pub fn import_metadata(&mut self, file: &PhysicalFile)
-    -> anyhow::Result<()> {
-        let res = TLS.with(|cell| -> anyhow::Result<()> {
+    /// Does a metadata import for this song using the given `PhysicalFile` and
+    /// returns the resulting metadata. (Use `import_metadata` if you want to
+    /// import directly.)
+    pub fn get_imported_metadata(&mut self, file: &PhysicalFile)
+    -> anyhow::Result<BTreeMap<String, String>> {
+        let res = TLS.with(|cell| -> anyhow::Result<BTreeMap<String,String>> {
             let mut cellref = cell.borrow_mut();
             let (ref mut last_load_generation, ref mut lua_state) = *cellref;
             if lua_state.is_none()
@@ -518,7 +544,7 @@ impl LogicalSong {
             let paths = lua.create_table_from(file.get_absolute_paths().iter().enumerate().map(|(i, x)| (i+1, x.to_string_lossy().into_owned()))).anyhowify()?;
             globals.raw_set("paths", paths).anyhowify()?;
             globals.raw_set("file_id", file.get_id().to_string()).anyhowify()?;
-            let song_id: Option<i64> = if self.id.inner == 0 { None }
+            let song_id: Option<i64> = if self.id == NO_SONG_ID { None }
             else { Some(self.id.inner.try_into().unwrap()) };
             globals.raw_set("song_id", song_id).anyhowify()?;
             let func: Function
@@ -539,12 +565,28 @@ impl LogicalSong {
                 new_metadata.insert("song_id".to_owned(),
                                     format!("{}", song_id));
             }
-            self.user_metadata = new_metadata;
-            Ok(())
+            Ok(new_metadata)
         });
         match res {
-            Ok(_) => Ok(()),
+            Ok(x) => Ok(x),
             Err(x) => Err(anyhow!("{}", x)),
+        }
+    }
+    /// Imports metadata for the given song, and sets it. Returns true if the
+    /// metadata changed, false if it stayed the same.
+    pub fn import_metadata(&mut self, file: &PhysicalFile)
+    -> anyhow::Result<bool> {
+        let new_metadata = self.get_imported_metadata(file)?;
+        if self.user_metadata != new_metadata {
+            self.user_metadata = new_metadata;
+            if self.id != NO_SONG_ID {
+                db::update_song_metadata(self.id, &self.user_metadata);
+                GENERATION.bump();
+            }
+            Ok(true)
+        }
+        else {
+            Ok(false)
         }
     }
 }

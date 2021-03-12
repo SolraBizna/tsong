@@ -5,14 +5,18 @@ use gtk::{
     BoxBuilder,
     ButtonBoxBuilder, ButtonBoxStyle,
     Button, ButtonBuilder,
+    ButtonsType,
     CellRendererText,
     CellRendererToggle,
+    DialogFlags,
     Entry, EntryBuilder,
     LabelBuilder,
     ListStore,
+    MessageDialog, MessageType,
     Notebook, NotebookBuilder,
     Orientation,
     PolicyType,
+    ResponseType,
     ScrolledWindowBuilder,
     SelectionMode,
     SeparatorBuilder,
@@ -25,9 +29,10 @@ use glib::{
     Type
 };
 use std::{
-    collections::{BTreeMap,HashMap},
+    collections::{BTreeMap, HashMap},
     cell::RefCell,
-    rc::{Rc,Weak},
+    rc::{Rc, Weak},
+    sync::{Arc, atomic::{AtomicBool, Ordering}, mpsc},
 };
 
 // TODO: this should be fluent...
@@ -55,7 +60,6 @@ pub struct Controller {
     meta_key_cell: CellRendererText,
     meta_key_column: TreeViewColumn,
     meta_value_cell: CellRendererText,
-    meta_value_column: TreeViewColumn,
     meta_modified_cell: CellRendererToggle,
     /// The metadata values as they currently exist. `Some("...")` = all
     /// selected songs have this value for this key. `None` = at least one song
@@ -68,7 +72,9 @@ pub struct Controller {
     /// empty string = the value is set. Empty string = the key is deleted.
     meta_edits: BTreeMap<String, String>,
     delete_meta_button: Button,
-    reimport_meta_button: Button,
+    // meta_script_button: Button,
+    reimport_all_meta_button: Button,
+    reimport_selected_meta_button: Button,
     new_meta_button: Button,
     notebook: Notebook,
     columns_page: u32,
@@ -78,6 +84,12 @@ pub struct Controller {
     cancel_button: Button,
     revert_button: Button,
     ok_button: Button,
+    song_meta_update_tx: mpsc::Sender<SongID>,
+    /// Whether a "background script" is currently running.
+    ///
+    /// This only transitions from `false` to `true` in the main thread, and
+    /// from `true` to `false` in a side thread.
+    script_in_progress: Arc<AtomicBool>,
 }
 
 const META_COLUMN_TYPES: &[Type] = &[Type::String, Type::String, Type::U32,
@@ -99,7 +111,8 @@ const EMPTY_VALUE: &str = "";
 
 impl Controller {
     pub fn new(parent: Weak<RefCell<super::Controller>>,
-               icons: &mut super::Icons)
+               icons: &mut super::Icons,
+               song_meta_update_tx: mpsc::Sender<SongID>)
     -> Rc<RefCell<Controller>> {
         let window = WindowBuilder::new()
             .name("editor").type_(WindowType::Toplevel)
@@ -228,11 +241,21 @@ impl Controller {
         delete_meta_button.set_sensitive(false);
         metadata_button_box.add(&delete_meta_button);
         icons.set_icon(&delete_meta_button, "tsong-remove");
-        let reimport_meta_button = ButtonBuilder::new()
-            .label("Re-import").build();
-        reimport_meta_button.set_sensitive(false);
-        // hide the unimplemented button
-        //metadata_button_box.add(&reimport_meta_button);
+        // Hide unimplemented feature
+        /*
+        let meta_script_button = ButtonBuilder::new()
+            .label("Run _Lua Script…").use_underline(true).build();
+        meta_script_button.set_sensitive(false);
+        metadata_button_box.add(&meta_script_button);
+         */
+        let reimport_all_meta_button = ButtonBuilder::new()
+            .label("_Re-import All").use_underline(true).build();
+        reimport_all_meta_button.set_sensitive(false);
+        metadata_button_box.add(&reimport_all_meta_button);
+        let reimport_selected_meta_button = ButtonBuilder::new()
+            .label("Re-import _Selected").use_underline(true).build();
+        reimport_selected_meta_button.set_sensitive(false);
+        metadata_button_box.add(&reimport_selected_meta_button);
         let new_meta_button = ButtonBuilder::new().build();
         new_meta_button.set_sensitive(false);
         metadata_button_box.add(&new_meta_button);
@@ -266,16 +289,18 @@ impl Controller {
             window, notebook, columns_page, meta_page,
             parent, columns_model: ListStore::new(&[Type::String, Type::U32]),
             delete_column_button, new_column_button, column_tag_column,
-            delete_meta_button, reimport_meta_button, new_meta_button,
+            delete_meta_button, reimport_all_meta_button,
+            reimport_selected_meta_button, new_meta_button,
             columns_view, apply_button, cancel_button, ok_button,
-            revert_button,
-            meta_key_cell, meta_value_cell, meta_key_column, meta_value_column,
-            meta_modified_cell,
+            revert_button, // meta_script_button,
+            meta_key_cell, meta_value_cell, meta_key_column,meta_modified_cell,
             meta_orig: BTreeMap::new(),
             meta_edits: BTreeMap::new(), meta_renames: BTreeMap::new(),
             column_tag_cell, playlist_code, active_playlist: None,
             metadata_model, metadata_view,
-            selected_songs: Vec::new(), me: None
+            script_in_progress: Arc::new(AtomicBool::new(false)),
+            selected_songs: Vec::new(), me: None,
+            song_meta_update_tx,
         }));
         let mut this = ret.borrow_mut();
         this.me = Some(Rc::downgrade(&ret));
@@ -354,9 +379,76 @@ impl Controller {
                 .map(|mut x| x.clicked_new_meta());
         });
         let controller = ret.clone();
-        this.reimport_meta_button.connect_clicked(move |_| {
+        let window = this.window.clone();
+        let metadata_view = this.metadata_view.clone();
+        this.reimport_selected_meta_button.connect_clicked(move |_| {
+            if controller.borrow().maybe_show_script_wait_dialog() {
+                return;
+            }
+            let selection = metadata_view.get_selection();
+            let (wo_list, model) = selection.get_selected_rows();
+            let model: &ListStore = model.downcast_ref().unwrap();
+            let keys_to_reimport: Vec<String> = wo_list.into_iter()
+                .filter_map(|wo| model.get_iter(&wo))
+                .filter_map(|iter| model.get_value(&iter,
+                                                   META_KEY_COLUMN as i32)
+                            .get().ok()?)
+                .collect();
+            if keys_to_reimport.is_empty() {
+                // we weren't supposed to be clickable in the first place
+                return;
+            }
+            let dirty = {
+                let controller = controller.borrow_mut();
+                !(controller.meta_renames.is_empty()
+                  && controller.meta_edits.is_empty())
+            };
+            let dialog = if dirty {
+                MessageDialog::new(Some(&window),
+                                   DialogFlags::MODAL,
+                                   MessageType::Error,
+                                   ButtonsType::Cancel,
+                                   "Please apply your changes before re-\
+                                    importing specific metadata.")
+            }
+            else {
+                MessageDialog::new(Some(&window),
+                                   DialogFlags::MODAL,
+                                   MessageType::Warning,
+                                   ButtonsType::OkCancel,
+                                   "Are you sure you want to attempt to \
+                                    replace all selected metadata with values \
+                                    from the original? (Metadata missing from \
+                                    the original will be lost!)")
+            };
+            let result = dialog.run();
+            dialog.close();
+            if result == ResponseType::Cancel { return }
             let _ = controller.try_borrow_mut()
-                .map(|mut x| x.populate_meta());
+                .map(|mut x| x.reimport_selected_meta(keys_to_reimport));
+        });
+        let controller = ret.clone();
+        let window = this.window.clone();
+        this.reimport_all_meta_button.connect_clicked(move |_| {
+            if controller.borrow().maybe_show_script_wait_dialog() {
+                return;
+            }
+            let dialog = MessageDialog::new(Some(&window),
+                                            DialogFlags::MODAL,
+                                            MessageType::Warning,
+                                            ButtonsType::OkCancel,
+                                            "Are you sure you want to \
+                                             re-import the original metadata? \
+                                             ALL CUSTOM METADATA WILL BE \
+                                             LOST!");
+            // technically, we're lying. if their custom import.lua doesn't
+            // destroy outmeta like the default one does, metadata will stick
+            // around.
+            let result = dialog.run();
+            dialog.close();
+            if result == ResponseType::Cancel { return }
+            let _ = controller.try_borrow_mut()
+                .map(|mut x| x.reimport_all_meta());
         });
         let controller = ret.clone();
         this.delete_meta_button.connect_clicked(move |_| {
@@ -364,11 +456,15 @@ impl Controller {
                 .map(|mut x| x.clicked_delete_meta());
         });
         let delete_meta_button = this.delete_meta_button.clone();
+        let reimport_selected_meta_button = this.reimport_selected_meta_button
+            .clone();
         this.metadata_view.connect_cursor_changed(move |metadata_view| {
             // this doesn't reference Controller because we *want* it to update
             // automatically, even when we caused the change
             delete_meta_button.set_sensitive
-                (metadata_view.get_cursor().0.is_some())
+                (metadata_view.get_cursor().0.is_some());
+            reimport_selected_meta_button.set_sensitive
+                (metadata_view.get_cursor().0.is_some());
         });
         drop(this);
         ret
@@ -400,8 +496,10 @@ impl Controller {
                 self.apply_meta_edits(song_ref);
             }
         }
-        // TODO: skip this step if we actually clicked "Save & Close"?
-        self.populate_meta();
+        // This will get called automatically when the main UI notices we've
+        // changed some metadata. Bonus: It won't if we've been called by
+        // clicking "Save & Close" and our window got closed!
+        //self.populate_meta();
         None
     }
     fn clicked_cancel(&mut self) {
@@ -456,8 +554,9 @@ impl Controller {
                 .map(|x| self.selected_songs.push(x));
         }
         if self.window.is_visible() { self.populate_meta() }
-        self.reimport_meta_button.set_sensitive(self.selected_songs.len() !=0);
+        self.reimport_all_meta_button.set_sensitive(self.selected_songs.len() !=0);
         self.new_meta_button.set_sensitive(self.selected_songs.len() != 0);
+        //self.meta_script_button.set_sensitive(self.selected_songs.len() != 0);
     }
     fn populate(&mut self) {
         let playlist_ref = match self.active_playlist.as_ref() {
@@ -802,8 +901,8 @@ impl Controller {
             }
         }
         // Okay!
-        if dirty {
-            song.set_metadata(metadata);
+        if dirty && song.set_metadata(metadata) {
+            let _ = self.song_meta_update_tx.send(song.get_id());
         }
     }
     fn clicked_new_meta(&mut self) {
@@ -870,5 +969,114 @@ impl Controller {
             }
         }
         None
+    }
+    fn kickoff_script<T: 'static + FnOnce() + Send>(&mut self, func: T) {
+        let script_in_progress = self.script_in_progress.clone();
+        script_in_progress.store(true, Ordering::Relaxed);
+        match self.parent.upgrade() {
+            Some(parent) => match parent.try_borrow() {
+                Ok(parent) => parent.force_spinner_start(),
+                _ => (),
+            },
+            _ => (),
+        }
+        std::thread::Builder::new().name("Background Script".to_string())
+            .spawn(move || {
+                func();
+                script_in_progress.store(false, Ordering::Relaxed);
+            }).expect("Couldn't find background thread");
+    }
+    fn reimport_all_meta(&mut self) {
+        // TODO: here, and in reimport_selected_meta, allow to choose which
+        // file to import metadata from
+        let selected_songs = self.selected_songs.clone();
+        let song_meta_update_tx = self.song_meta_update_tx.clone();
+        self.kickoff_script(move || {
+            for song_ref in selected_songs.iter() {
+                let mut song = song_ref.write().unwrap();
+                let file = match song.get_physical_files().iter()
+                    .filter_map(physical::get_file_by_id)
+                    .next() {
+                        Some(file) => file,
+                        None => {
+                            drop(song);
+                            eprintln!("Song {:?} couldn't be reimported \
+                                       because it has no physical files...?",
+                                      song_ref);
+                            continue
+                        },
+                    };
+                let file = file.read().unwrap();
+                match song.import_metadata(&*file) {
+                    Ok(false) => (),
+                    Ok(true) => {
+                        let _ = song_meta_update_tx.send(song.get_id());
+                    },
+                    Err(x) => {
+                        drop(song);
+                        eprintln!("Error importing metadata for song {:?}:\n\
+                                   {}", song_ref, x);
+                        continue
+                    },
+                }
+            }
+        });
+    }
+    fn reimport_selected_meta(&mut self, keys_to_import: Vec<String>) {
+        let selected_songs = self.selected_songs.clone();
+        let song_meta_update_tx = self.song_meta_update_tx.clone();
+        self.kickoff_script(move || {
+            for song_ref in selected_songs.iter() {
+                let mut song = song_ref.write().unwrap();
+                let file = match song.get_physical_files().iter()
+                    .filter_map(physical::get_file_by_id)
+                    .next() {
+                        Some(file) => file,
+                        None => {
+                            drop(song);
+                            eprintln!("Song {:?} couldn't be reimported \
+                                       because it has no physical files...?",
+                                      song_ref);
+                            continue
+                        },
+                    };
+                let file = file.read().unwrap();
+                let imported = match song.get_imported_metadata(&*file) {
+                    Ok(x) => x,
+                    Err(x) => {
+                        drop(song);
+                        eprintln!("Error importing metadata for song {:?}:\n\
+                                   {}", song_ref, x);
+                        continue
+                    },
+                };
+                let mut new_metadata = song.get_metadata().clone();
+                for key in keys_to_import.iter() {
+                    new_metadata.remove(key);
+                    if let Some(value) = imported.get(key) {
+                        new_metadata.insert(key.clone(), value.clone());
+                    }
+                }
+                if song.set_metadata(new_metadata) {
+                    let _ = song_meta_update_tx.send(song.get_id());
+                }
+            }
+        });
+    }
+    fn maybe_show_script_wait_dialog(&self) -> bool {
+        if !self.script_is_in_progress() { return false }
+        let dialog = MessageDialog::new(Some(&self.window),
+                                        DialogFlags::MODAL,
+                                        MessageType::Error,
+                                        ButtonsType::Cancel,
+                                        "Please wait for the previous batch \
+                                         operation to complete before \
+                                         starting another.");
+        let _ = dialog.run();
+        dialog.close();
+        true
+    }
+    pub fn script_is_in_progress(&self) -> bool {
+        self.script_in_progress.load(Ordering::Relaxed)
     }
 }

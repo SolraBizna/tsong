@@ -377,21 +377,25 @@ impl Playlist {
         &self.sorted_songs[..]
     }
     /// Sort (or shuffle) this playlist.
-    pub fn resort(&mut self) {
-        self.sorted_songs = self.unsorted_songs.clone();
+    ///
+    /// Returns true if the order of the playlist's contents changed as a
+    /// result of the sort, false if it remained the same.
+    pub fn resort(&mut self) -> bool {
+        let mut newly_sorted_songs = self.unsorted_songs.clone();
         if self.shuffled {
-            // in place sorting hat algorithm!
             let mut rng = thread_rng();
-            if self.sorted_songs.len() <= 1 { return }
-            for n in 0 .. self.sorted_songs.len() - 1 {
-                let a = n;
-                let b = rng.gen_range(n+1 .. self.sorted_songs.len());
-                self.sorted_songs.swap(a, b);
+            if newly_sorted_songs.len() > 1 {
+                // in place sorting hat algorithm!
+                for n in 0 .. newly_sorted_songs.len() - 1 {
+                    let a = n;
+                    let b = rng.gen_range(n+1 .. newly_sorted_songs.len());
+                    newly_sorted_songs.swap(a, b);
+                }
             }
         }
         else {
             let sort_order = &self.sort_order;
-            self.sorted_songs.sort_by(|a, b| {
+            newly_sorted_songs.sort_by(|a, b| {
                 let a = a.read().unwrap();
                 let b = b.read().unwrap();
                 for (key, desc) in sort_order {
@@ -406,7 +410,14 @@ impl Playlist {
                 a.get_id().cmp(&b.get_id())
             });
         }
-        self.self_generation.bump();
+        if newly_sorted_songs != self.sorted_songs {
+            self.sorted_songs = newly_sorted_songs;
+            self.self_generation.bump();
+            true
+        }
+        else {
+            false
+        }
     }
 }
 
