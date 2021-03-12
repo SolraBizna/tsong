@@ -42,8 +42,9 @@ pub struct Icons {
 fn get_icon_image(scale_factor: i32, color: &RGBA, name: &str)
 -> Option<Image> {
     let icon_theme = IconTheme::get_default()?;
-    let icon = icon_theme.lookup_icon(name, 24 * scale_factor,
-                                      IconLookupFlags::FORCE_SYMBOLIC)?;
+    let icon = icon_theme.lookup_icon_for_scale(name, 24, scale_factor,
+                                                IconLookupFlags
+                                                ::FORCE_SYMBOLIC)?;
     let image = icon.load_symbolic(color, None, None, None).ok()?.0;
     Some(Image::from_pixbuf(Some(&image)))
 }
