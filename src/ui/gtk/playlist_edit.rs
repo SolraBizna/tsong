@@ -111,7 +111,6 @@ const EMPTY_VALUE: &str = "";
 
 impl Controller {
     pub fn new(parent: Weak<RefCell<super::Controller>>,
-               icons: &mut super::Icons,
                song_meta_update_tx: mpsc::Sender<SongID>)
     -> Rc<RefCell<Controller>> {
         let window = WindowBuilder::new()
@@ -183,11 +182,11 @@ impl Controller {
         let delete_column_button = ButtonBuilder::new().build();
         delete_column_button.set_sensitive(false);
         column_button_box.add(&delete_column_button);
-        icons.set_icon(&delete_column_button, "tsong-remove");
+        super::set_icon(&delete_column_button, "tsong-remove");
         let new_column_button = ButtonBuilder::new().build();
         column_button_box.add(&new_column_button);
         columns_box.add(&column_button_box);
-        icons.set_icon(&new_column_button, "tsong-add");
+        super::set_icon(&new_column_button, "tsong-add");
         // The song metadata
         let metadata_model = ListStore::new(META_COLUMN_TYPES);
         let metadata_window = ScrolledWindowBuilder::new()
@@ -240,7 +239,7 @@ impl Controller {
         let delete_meta_button = ButtonBuilder::new().build();
         delete_meta_button.set_sensitive(false);
         metadata_button_box.add(&delete_meta_button);
-        icons.set_icon(&delete_meta_button, "tsong-remove");
+        super::set_icon(&delete_meta_button, "tsong-remove");
         // Hide unimplemented feature
         /*
         let meta_script_button = ButtonBuilder::new()
@@ -260,7 +259,7 @@ impl Controller {
         new_meta_button.set_sensitive(false);
         metadata_button_box.add(&new_meta_button);
         meta_box.add(&metadata_button_box);
-        icons.set_icon(&new_meta_button, "tsong-add");
+        super::set_icon(&new_meta_button, "tsong-add");
         // The buttons
         big_box.pack_start(&SeparatorBuilder::new()
                            .orientation(Orientation::Horizontal)

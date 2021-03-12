@@ -13,7 +13,8 @@ use gtk::{
     DialogFlags,
     Entry, EntryBuilder,
     Grid, GridBuilder,
-    IconTheme,
+    IconSize, IconTheme,
+    Image,
     Label, LabelBuilder,
     ListStore,
     MessageDialog, MessageType,
@@ -25,7 +26,6 @@ use gtk::{
     SelectionMode,
     SeparatorBuilder,
     Spinner, SpinnerBuilder,
-    StateFlags,
     StyleContext,
     ToggleButton, ToggleButtonBuilder,
     TreeIter, TreePath, TreeStore, TreeRowReference, TreeModelFlags,
@@ -56,9 +56,6 @@ use anyhow::anyhow;
 
 mod settings;
 mod playlist_edit;
-mod icons;
-
-pub use icons::Icons as Icons;
 
 const INACTIVE_WEIGHT: u32 = 400; // normal weight
 const ACTIVE_WEIGHT: u32 = 800; // bold
@@ -95,7 +92,6 @@ pub struct Controller {
     remote_time: f64,
     last_active_playlist: Option<(TreeIter,PlaylistRef)>,
     last_active_song: Option<(Option<TreeIter>,LogicalSongRef)>,
-    icons: Icons,
     scan_thread: ScanThread,
     rolled_down_height: i32,
     settings_controller: Option<Rc<RefCell<settings::Controller>>>,
@@ -261,16 +257,15 @@ impl Controller {
         // (fun fact! if this is an f32 instead of an f64, it breaks!)
         let _ = playlist_name_cell.set_property("scale", &0.80);
         // now, icons!
-        let mut icons: Icons = Default::default();
-        icons.set_icon(&settings_button, "tsong-settings");
-        icons.set_icon(&prev_button, "tsong-prev");
-        icons.set_icon(&next_button, "tsong-next");
-        icons.set_icon(&play_button, "tsong-pause");
-        icons.set_icon(&rollup_button, "tsong-rollup");
-        icons.set_icon(&shuffle_button, "tsong-shuffle");
-        icons.set_icon(&playmode_button, "tsong-loop");
-        icons.set_icon(&new_playlist_button, "tsong-add");
-        icons.set_icon(&delete_playlist_button, "tsong-remove");
+        set_icon(&settings_button, "tsong-settings");
+        set_icon(&prev_button, "tsong-prev");
+        set_icon(&next_button, "tsong-next");
+        set_icon(&play_button, "tsong-pause");
+        set_icon(&rollup_button, "tsong-rollup");
+        set_icon(&shuffle_button, "tsong-shuffle");
+        set_icon(&playmode_button, "tsong-loop");
+        set_icon(&new_playlist_button, "tsong-add");
+        set_icon(&delete_playlist_button, "tsong-remove");
         let (song_meta_update_tx, song_meta_update_rx) = mpsc::channel();
         let nu = Rc::new(RefCell::new(Controller {
             rollup_button, settings_button, prev_button, next_button,
@@ -286,7 +281,7 @@ impl Controller {
             active_playlist: None, playlist_generation: Default::default(),
             last_built_playlist: None, me: None, settings_controller: None,
             playlist_edit_controller: None, rolled_down_height: 400,
-            periodic_timer: None, volume_changed: false, icons,
+            periodic_timer: None, volume_changed: false,
             song_meta_update_rx,
         }));
         // Throughout this application, we make use of a hack.
@@ -296,12 +291,11 @@ impl Controller {
         // controller, so we ignore the signal.
         let mut this = nu.borrow_mut();
         this.me = Some(Rc::downgrade(&nu));
-        this.settings_controller = Some(settings::Controller::new(Rc::downgrade(&nu), &mut this.icons));
-        this.playlist_edit_controller = Some(playlist_edit::Controller::new(Rc::downgrade(&nu), &mut this.icons, song_meta_update_tx));
+        this.settings_controller = Some(settings::Controller::new(Rc::downgrade(&nu)));
+        this.playlist_edit_controller = Some(playlist_edit::Controller::new(Rc::downgrade(&nu), song_meta_update_tx));
         this.remote = Some(Remote::new(Rc::downgrade(&nu)));
         this.delete_playlist_button
             .set_sensitive(this.delete_playlist_button_should_be_sensitive());
-        this.reload_icons();
         this.playlists_view.append_column(&this.playlist_name_column);
         this.reconnect_playlists_model();
         let controller = nu.clone();
@@ -808,10 +802,10 @@ impl Controller {
     fn update_view(&mut self) {
         let (status, active_song) = playback::get_status_and_active_song();
         if status.is_playing() {
-            self.icons.set_icon(&self.play_button, "tsong-pause");
+            set_icon(&self.play_button, "tsong-pause");
         }
         else {
-            self.icons.set_icon(&self.play_button, "tsong-play");
+            set_icon(&self.play_button, "tsong-play");
         }
         let active_song = match active_song {
             None => {
@@ -995,7 +989,7 @@ impl Controller {
         let status = playback::get_playback_status();
         if status.is_playing() {
             playback::send_command(PlaybackCommand::Pause);
-            self.icons.set_icon(&self.play_button, "tsong-play");
+            set_icon(&self.play_button, "tsong-play");
         }
         else {
             let song_to_play = if status == PlaybackStatus::Stopped {
@@ -1008,7 +1002,7 @@ impl Controller {
                     .and_then(logical::get_song_by_song_id)
             } else { None };
             playback::send_command(PlaybackCommand::Play(song_to_play));
-            self.icons.set_icon(&self.play_button, "tsong-pause");
+            set_icon(&self.play_button, "tsong-pause");
             self.force_periodic();
         }
     }
@@ -1072,19 +1066,17 @@ impl Controller {
             None => {
                 self.playmode_button.set_sensitive(false);
                 self.playmode_button.set_active(false);
-                self.icons.set_icon(&self.playmode_button, "tsong-loop");
+                set_icon(&self.playmode_button, "tsong-loop");
                 self.remote.as_ref().unwrap().set_cur_playmode(Playmode::End.into());
             },
             Some(playlist) => {
                 self.playmode_button.set_sensitive(true);
                 let playmode = playlist.read().unwrap().get_playmode();
                 if playmode == Playmode::LoopOne {
-                    self.icons.set_icon(&self.playmode_button,
-                                        "tsong-loop-one");
+                    set_icon(&self.playmode_button, "tsong-loop-one");
                 }
                 else {
-                    self.icons.set_icon(&self.playmode_button,
-                                        "tsong-loop");
+                    set_icon(&self.playmode_button, "tsong-loop");
                 }
                 self.playmode_button.set_active(playmode != Playmode::End);
                 self.remote.as_ref().unwrap().set_cur_playmode(playmode.into());
@@ -1177,13 +1169,13 @@ impl Controller {
             geom.max_height = self.control_box.get_allocated_height();
             self.rolled_down_height = self.window.get_allocated_height();
             self.rollup_grid.hide();
-            self.icons.set_icon(&self.rollup_button, "tsong-rolldown");
+            set_icon(&self.rollup_button, "tsong-rolldown");
             self.window.set_geometry_hints(Some(&self.window),
                                            Some(&geom), geom_mask);
         }
         else {
             self.rollup_grid.show();
-            self.icons.set_icon(&self.rollup_button, "tsong-rollup");
+            set_icon(&self.rollup_button, "tsong-rollup");
             self.window.set_geometry_hints(Some(&self.window),
                                            Some(&geom), geom_mask);
             self.window.resize(self.window.get_allocated_width(),
@@ -1255,12 +1247,6 @@ impl Controller {
         self.active_playlist.as_ref()
             .map(|x| x.write().unwrap()
                  .set_rule_code_and_columns(neu_code, neu_columns));
-    }
-    fn reload_icons(&mut self) {
-        let scale_factor = self.settings_button.get_scale_factor();
-        let color = self.settings_button.get_style_context()
-            .get_color(StateFlags::NORMAL);
-        self.icons.reload_icons(scale_factor, &color);
     }
     fn update_playlist_view(&self, playlist: RwLockReadGuard<Playlist>,
                             mut changed_songs: HashSet<SongID>)
@@ -1418,7 +1404,7 @@ impl RemoteTarget for Controller {
                     .and_then(logical::get_song_by_song_id)
             } else { None };
             playback::send_command(PlaybackCommand::Play(song_to_play));
-            self.icons.set_icon(&self.play_button, "tsong-pause");
+            set_icon(&self.play_button, "tsong-pause");
             self.force_periodic();
         }
         None
@@ -1598,4 +1584,13 @@ fn build_playlists_model(selected_playlists: &[PlaylistRef])
                                &playlist::get_top_level_playlists()[..],
                                active_playlist.as_ref());
     (playlists_model, selection_paths, neu_active_playlist)
+}
+
+/// Set the icon on a widget.
+fn set_icon<B: IsA<Button>>(button: &B, icon: &'static str) {
+    let button = button.upcast_ref();
+    button.set_image(Some(&Image::from_icon_name(Some(icon),
+                                                 IconSize::LargeToolbar)));
+    button.set_label("");
+    let _ = button.set_property("always-show-image", &true);
 }

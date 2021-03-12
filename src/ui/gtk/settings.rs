@@ -50,8 +50,7 @@ pub struct Controller {
 }
 
 impl Controller {
-    pub fn new(parent: Weak<RefCell<super::Controller>>,
-               icons: &mut super::Icons)
+    pub fn new(parent: Weak<RefCell<super::Controller>>)
     -> Rc<RefCell<Controller>> {
         let pa = PortAudio::new().expect("Could not initialize PortAudio");
         let window = WindowBuilder::new()
@@ -100,11 +99,11 @@ impl Controller {
         let delete_location_button = ButtonBuilder::new().build();
         delete_location_button.set_sensitive(false);
         location_button_box.add(&delete_location_button);
-        icons.set_icon(&delete_location_button, "tsong-remove");
+        super::set_icon(&delete_location_button, "tsong-remove");
         let new_location_button = ButtonBuilder::new().build();
         location_button_box.add(&new_location_button);
         big_box.add(&location_button_box);
-        icons.set_icon(&new_location_button, "tsong-add");
+        super::set_icon(&new_location_button, "tsong-add");
         // The buttons!
         big_box.pack_start(&SeparatorBuilder::new()
                             .orientation(Orientation::Horizontal).build(),
