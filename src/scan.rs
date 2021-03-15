@@ -169,7 +169,10 @@ fn search_thread_body(rescan_request_rx: mpsc::Receiver<Vec<String>>,
                 match ent.path().file_name().map(OsStr::to_string_lossy) {
                     Some(x) => if x.starts_with(".") || x.ends_with("\r")
                         || x.ends_with(".xml") || x.ends_with(".itl")
-                        || x.ends_with(".itdb") || x.ends_with(".m3u") {
+                        || x.ends_with(".itdb") || x.ends_with(".m3u")
+                        || x.ends_with(".itc")
+                        || (x.starts_with("iTunes Library ")
+                            && !x.contains(".")) {
                             continue
                     },
                     None => continue,
