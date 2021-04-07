@@ -101,7 +101,7 @@ pub fn open_database() -> anyhow::Result<()> {
         let parent_order: Option<i64> = row.get_unwrap(2);
         let name: String = row.get_unwrap(3);
         let rule_code: Option<String> = row.get_unwrap(4);
-        let manually_added_ids: Option<Vec<u8>> = row.get_unwrap(5);
+        let manually_added_ids: Option<String> = row.get_unwrap(5);
         let columns: Option<String> = row.get_unwrap(6);
         let sort_order: Option<String> = row.get_unwrap(7);
         let shuffled: Option<bool> = row.get_unwrap(8);
@@ -113,7 +113,9 @@ pub fn open_database() -> anyhow::Result<()> {
         let parent_order = parent_order.map(|x| x as u64).unwrap_or(u64::MAX);
         let rule_code = rule_code.unwrap_or_else(String::new);
         let manually_added_ids = match manually_added_ids {
-            Some(_) => todo!(),
+            Some(x) =>
+                json::from_str::<Vec<u64>>(&x)?
+                    .into_iter().map(SongID::from_inner).collect(),
             None => vec![],
         };
         let columns = match columns {
@@ -175,6 +177,16 @@ pub fn update_playlist_rule_code_and_columns(id: PlaylistID, new_code: &str,
     dbtry(database.execute("UPDATE Playlists SET rule_code = ?, columns = ? \
                             WHERE id = ?;",
                            params![new_code, columns, id.as_inner() as i64]));
+}
+
+pub fn update_playlist_manually_added_songs(id: PlaylistID, songs: &[SongID]) {
+    let songs = json::to_string(&songs.iter().map(SongID::as_inner).collect()
+                                as &Vec<u64>).unwrap();
+    let lock = DATABASE.lock();
+    let database = lock.as_ref().unwrap().as_ref().unwrap().borrow_mut();
+    dbtry(database.execute("UPDATE Playlists SET manually_added_ids = ? \
+                            WHERE id = ?;",
+                           params![songs, id.as_inner() as i64]));
 }
 
 pub fn update_playlist_shuffled(id: PlaylistID, shuffled: bool) {

@@ -11,6 +11,7 @@ use gtk::{
     ButtonsType,
     CellRendererText,
     Container,
+    DestDefaults,
     DialogFlags,
     Entry, EntryBuilder,
     Grid, GridBuilder,
@@ -24,20 +25,25 @@ use gtk::{
     PolicyType,
     ResponseType,
     ScrolledWindowBuilder,
+    SelectionData,
     SelectionMode,
     SeparatorBuilder,
     Spinner, SpinnerBuilder,
     StyleContext,
+    TargetEntry, TargetFlags,
     ToggleButton, ToggleButtonBuilder,
     TreeIter, TreePath, TreeStore, TreeRowReference,
     TreeModel, TreeModelFlags,
-    TreeView, TreeViewBuilder, TreeViewColumn,
+    TreeView, TreeViewBuilder, TreeViewColumn, TreeViewDropPosition,
     VolumeButton, VolumeButtonBuilder,
     Widget,
 };
 use gdk::{
+    Atom,
+    DragAction, DragContext,
     Geometry,
     Gravity,
+    ModifierType,
     Screen,
     WindowHints,
 };
@@ -49,7 +55,9 @@ use glib::{
 use gio::prelude::*;
 use std::{
     cell::RefCell,
+    cmp::Ordering,
     collections::HashSet,
+    convert::TryInto,
     rc::{Rc,Weak},
     sync::{RwLockReadGuard, mpsc},
 };
@@ -58,9 +66,25 @@ use anyhow::anyhow;
 
 mod settings;
 mod playlist_edit;
+mod scrp;
+use scrp::*;
 
 const INACTIVE_WEIGHT: u32 = 400; // normal weight
 const ACTIVE_WEIGHT: u32 = 800; // bold
+const TSONG_SONGS_MIMETYPE: &str = "application/x-tsong-songs";
+const TSONG_PLAYLISTS_MIMETYPE: &str = "application/x-tsong-playlists";
+const TSONG_SONGS_TYPE: u32 = 1;
+const TSONG_PLAYLISTS_TYPE: u32 = 2;
+
+const PLAYLIST_ID_COLUMN: u32 = 0;
+const PLAYLIST_NAME_COLUMN: u32 = 1;
+const PLAYLIST_WEIGHT_COLUMN: u32 = 2;
+
+const SONG_ID_COLUMN: u32 = 0;
+const SONG_WEIGHT_COLUMN: u32 = 1;
+const SONG_INDEX_COLUMN: u32 = 2;
+const SONG_IS_MANUAL_COLUMN: u32 = 3;
+const SONG_FIRST_META_COLUMN: u32 = 4;
 
 pub struct Controller {
     active_playlist: Option<PlaylistRef>,
@@ -106,6 +130,9 @@ pub struct Controller {
 
 impl Controller {
     pub fn new(application: &Application) -> Rc<RefCell<Controller>> {
+        let mut scan_thread = ScanThread::new();
+        scan_thread.rescan(prefs::get_music_paths())
+            .expect("Couldn't start the initial music scan!");
         let icon_theme = IconTheme::get_default().unwrap();
         if let Ok(path) = std::env::var("TSONG_ICON_PATH") {
             icon_theme.append_search_path(&path);
@@ -182,8 +209,9 @@ impl Controller {
             .vexpand(true)
             .build();
         let playlists_view = TreeViewBuilder::new()
-            .headers_visible(false).reorderable(true).build();
+            .headers_visible(false).build();
         playlists_view.set_search_column(1);
+        playlists_view.get_selection().set_mode(SelectionMode::Multiple);
         playlists_window.add(&playlists_view);
         playlists_box.add(&playlists_window);
         rollup_grid.attach(&playlists_box, 0, 0, 1, 1);
@@ -245,9 +273,101 @@ impl Controller {
         outer_box.add(&rollup_grid);
         // done setting up the widgets, time to bind everything to the
         // controller
-        let mut scan_thread = ScanThread::new();
-        scan_thread.rescan(prefs::get_music_paths())
-            .expect("Couldn't start the initial music scan!");
+        let manual_song_type = TargetEntry::new(TSONG_SONGS_MIMETYPE,
+                                                TargetFlags::SAME_APP
+                                                | TargetFlags::OTHER_WIDGET,
+                                                TSONG_SONGS_TYPE);
+        let playlist_type = TargetEntry::new(TSONG_PLAYLISTS_MIMETYPE,
+                                             TargetFlags::SAME_APP
+                                             | TargetFlags::SAME_WIDGET,
+                                                TSONG_PLAYLISTS_TYPE);
+        playlist_view.drag_source_set(ModifierType::BUTTON1_MASK,
+                                      &[manual_song_type.clone()],
+                                      DragAction::LINK);
+        playlists_view.drag_source_set(ModifierType::BUTTON1_MASK,
+                                      &[playlist_type.clone()],
+                                       DragAction::MOVE);
+        playlists_view.drag_dest_set(DestDefaults::empty(),
+                                     &[manual_song_type.clone(),
+                                       playlist_type.clone()],
+                                     DragAction::LINK|DragAction::MOVE);
+        let tsong_songs_mimetype_atom = Atom::intern(TSONG_SONGS_MIMETYPE);
+        let tsong_playlists_mimetype_atom = Atom::intern(TSONG_PLAYLISTS_MIMETYPE);
+        playlist_view.connect_drag_data_get(
+            move |playlist_view, _context, data, _info, _timestamp| {
+                let selection = playlist_view.get_selection();
+                let (wo_list, model) = selection.get_selected_rows();
+                let mut selected_songs = Vec::new();
+                for wo in wo_list.iter() {
+                    model.get_iter(wo)
+                        .map(|x| model.get_value(&x, SONG_ID_COLUMN as i32))
+                        .map(|x| {
+                            let id = value_to_song_id(x).unwrap().as_inner();
+                            selected_songs.extend_from_slice
+                                (&id.to_ne_bytes()[..])
+                        });
+                }
+                data.set(&tsong_songs_mimetype_atom, 8, &selected_songs[..]);
+            });
+        playlists_view.connect_drag_data_get(
+            move |playlists_view, _context, data, _info, _timestamp| {
+                let selection = playlists_view.get_selection();
+                let (wo_list, model) = selection.get_selected_rows();
+                let mut selected_playlists = Vec::new();
+                for wo in wo_list.iter() {
+                    model.get_iter(wo)
+                        .map(|x| model.get_value(&x,
+                                                 PLAYLIST_ID_COLUMN as i32))
+                        .map(|x| {
+                            let id = value_to_playlist_id(x).unwrap()
+                                .as_inner();
+                            selected_playlists.extend_from_slice
+                                (&id.to_ne_bytes()[..])
+                        });
+                }
+                data.set(&tsong_playlists_mimetype_atom,
+                         8, &selected_playlists[..]);
+            });
+        playlists_view.connect_drag_motion(
+            move|playlists_view, context, x, y, time| {
+                match check_drag_onto_playlist
+                    (playlists_view, context, x, y, time,
+                     &tsong_songs_mimetype_atom,
+                     &tsong_playlists_mimetype_atom) {
+                        Some((wo, pos, action, _target)) => {
+                            context.drag_status(action, time);
+                            playlists_view.set_drag_dest_row(Some(&wo), pos);
+                            Inhibit(true)
+                        },
+                        None => {
+                            let pos = TreeViewDropPosition::Before;
+                            context.drag_status(DragAction::empty(), time);
+                            playlists_view.set_drag_dest_row(None, pos);
+                            Inhibit(false)
+                        },
+                    }
+            });
+        playlists_view.connect_drag_drop(
+            move|playlists_view, context, x, y, time| {
+                match check_drag_onto_playlist
+                    (playlists_view, context, x, y, time,
+                     &tsong_songs_mimetype_atom,
+                     &tsong_playlists_mimetype_atom) {
+                        Some((wo, pos, action, target)) => {
+                            context.drag_status(action, time);
+                            playlists_view.set_drag_dest_row(Some(&wo), pos);
+                            playlists_view.drag_get_data(context, target,
+                                                         time);
+                            Inhibit(true)
+                        },
+                        None => {
+                            let pos = TreeViewDropPosition::Before;
+                            context.drag_status(DragAction::empty(), time);
+                            playlists_view.set_drag_dest_row(None, pos);
+                            Inhibit(false)
+                        },
+                    }
+            });
         let playlist_model = None;
         let (playlists_model, _, neu_active_playlist)
             = build_playlists_model(&[]);
@@ -304,7 +424,6 @@ impl Controller {
         this.delete_playlist_button
             .set_sensitive(this.delete_playlist_button_should_be_sensitive());
         this.playlists_view.append_column(&this.playlist_name_column);
-        this.reconnect_playlists_model();
         let controller = nu.clone();
         this.volume_button.connect_value_changed(move |_, value| {
             let _ = controller.try_borrow_mut()
@@ -342,6 +461,37 @@ impl Controller {
             let _ = controller.try_borrow_mut()
                 .map(|mut x| x.playlists_cursor_changed());
         });
+        let controller = nu.clone();
+        this.playlists_view.connect_drag_data_received(
+            move|playlists_view, context, x, y, data, info, time| {
+                match check_drag_onto_playlist
+                    (playlists_view, context, x, y, time,
+                     &tsong_songs_mimetype_atom,
+                     &tsong_playlists_mimetype_atom) {
+                        Some((wo, pos, _action, _target)) => {
+                            match info {
+                                TSONG_SONGS_TYPE => {
+                                    let res = controller.try_borrow_mut()
+                                        .map(|mut x| x.dragged_songs_onto_playlist_list(data, wo, pos, time)).unwrap_or((false, false));
+context.drag_finish(res.0, res.1, time);
+                                },
+                                TSONG_PLAYLISTS_TYPE => {
+                                    let res = controller.try_borrow_mut()
+                                        .map(|mut x| x.dragged_playlists_in_playlist_list(data, wo, pos, time)).unwrap_or((false, false));
+                                    context.drag_finish(res.0, res.1, time);
+                                },
+                                _ => {
+                                    context.drag_finish(false, false, time);
+                                },
+                            }
+                        },
+                        None => {
+                            // handle this without having to involve the
+                            // controller
+                            context.drag_finish(false, false, time);
+                        },
+                    }
+            });
         let controller = nu.clone();
         this.playlist_view.connect_row_activated(move |_, wo, _| {
             let _ = controller.try_borrow_mut()
@@ -472,6 +622,20 @@ impl Controller {
             return Inhibit(false)
         });
         let controller = nu.clone();
+        this.playlist_view.connect_key_press_event(move |_, evt| {
+            let keyval = evt.get_keyval();
+            use gdk::keys::constants as key;
+            match keyval {
+                key::Delete | key::BackSpace => {
+                    let _ = controller.try_borrow_mut()
+                        .map(|mut x| x.delete_selected_songs());
+                    return Inhibit(true)
+                },
+                _ => (),
+            }
+            return Inhibit(false)
+        });
+        let controller = nu.clone();
         this.playlist_view.get_selection().connect_changed(move |_| {
             let _ = controller.try_borrow()
                 .map(|x| x.update_selected_songs());
@@ -487,18 +651,19 @@ impl Controller {
         // Discard any song metadata updates that are queued, since we're
         // rebuilding the whole view.
         while let Ok(_) = self.song_meta_update_rx.try_recv() {}
-        // TODO: songs_to_select instead of song_to_select
-        let song_to_select = match self.last_built_playlist.as_ref() {
+        let songs_to_select = match self.last_built_playlist.as_ref() {
             Some(playlist) if Some(playlist) == self.active_playlist.as_ref()
-                => {
-                let playlist_model = self.playlist_model.as_ref().unwrap();
-                self.playlist_view.get_cursor().0
-                    .and_then(|x| playlist_model.get_iter(&x))
-                    .map(|x| playlist_model.get_value(&x, 0))
-                    .and_then(value_to_song_id)
-                    .and_then(logical::get_song_by_song_id)
+            => {
+                let (wo_list, model) = self.playlist_view.get_selection()
+                    .get_selected_rows();
+                let result: HashSet<SongID> = wo_list.iter()
+                    .filter_map(|x| model.get_iter(&x))
+                    .map(|x| model.get_value(&x, SONG_ID_COLUMN as i32))
+                    .filter_map(value_to_song_id)
+                    .collect();
+                result
             },
-            _ => None,
+            _ => HashSet::new(),
         };
         let active_song = playback::get_active_song();
         let active_song = active_song.as_ref().map(|x| &x.0);
@@ -512,16 +677,29 @@ impl Controller {
             self.playlist_view.remove_column(&column);
         }
         let tvc = TreeViewColumn::new();
-        let cell = CellRendererText::new();
-        cell.set_alignment(1.0, 0.5);
         tvc.set_title("#");
         tvc.set_clickable(false);
         tvc.set_fixed_width(50);
         tvc.set_sort_indicator(false);
-        tvc.pack_start(&cell, true);
         tvc.set_alignment(1.0);
-        tvc.add_attribute(&cell, "text", 2);
-        tvc.add_attribute(&cell, "weight", 1);
+        let cell = SensitiveCellRendererPixbuf::new();
+        tvc.pack_start(&cell, true);
+        cell.set_alignment(0.0, 0.5);
+        let _ = cell.set_property("icon-name", &"tsong-delete-manual-song");
+        tvc.add_attribute(&cell, "visible", SONG_IS_MANUAL_COLUMN as i32);
+        tvc.add_attribute(&cell, "sensitive", SONG_IS_MANUAL_COLUMN as i32);
+        let controller = Weak::upgrade(self.me.as_ref().unwrap())
+            .unwrap();
+        cell.connect_clicked(move |path| {
+            let _ = controller.try_borrow_mut()
+                .map(|mut x| x.delete_manual_song(path));
+            true
+        });
+        let cell = CellRendererText::new();
+        tvc.pack_start(&cell, true);
+        cell.set_alignment(1.0, 0.5);
+        tvc.add_attribute(&cell, "text", SONG_INDEX_COLUMN as i32);
+        tvc.add_attribute(&cell, "weight", SONG_WEIGHT_COLUMN as i32);
         self.playlist_view.append_column(&tvc);
         let playlist_ref = match self.active_playlist.as_ref() {
             Some(x) => x,
@@ -546,6 +724,7 @@ impl Controller {
         types.push(SONG_ID_TYPE); // Song ID
         types.push(Type::U32); // Weight of text
         types.push(Type::U32); // Index in playlist
+        types.push(Type::Bool); // Whether the song was manually added
         for _ in playlist.get_columns() {
             types.push(Type::String); // Each metadata column...
         }
@@ -555,7 +734,7 @@ impl Controller {
         let first_sort_by = playlist.get_sort_order().get(0);
          */
         let playlist_model = ListStore::new(&types[..]);
-        let mut column_index: u32 = 3;
+        let mut column_index: u32 = SONG_FIRST_META_COLUMN;
         for column in playlist.get_columns() {
             let tvc = TreeViewColumn::new();
             let cell = CellRendererText::new();
@@ -601,7 +780,7 @@ impl Controller {
                 // tvc.set_alignment(1.0);
             }
             tvc.add_attribute(&cell, "text", column_index as i32);
-            tvc.add_attribute(&cell, "weight", 1);
+            tvc.add_attribute(&cell, "weight", SONG_WEIGHT_COLUMN as i32);
             // TODO: i18n this
             column_index += 1;
             self.playlist_view.append_column(&tvc);
@@ -611,17 +790,21 @@ impl Controller {
         self.playlist_view.append_column(&tvc);
         let mut song_index = 1;
         let mut total_duration = 0u32;
-        let mut place_to_put_cursor = None;
         self.last_active_song = active_song.map(|x| {
             (None, x.clone())
         });
+        let manual_songs: HashSet<SongID>
+            = playlist.get_manual_songs().iter().map(|x| *x).collect();
+        // TODO: can we set the cursor and also select the proper other rows?
+        let mut rows_to_select = Vec::new();
         for song_ref in playlist.get_songs() {
             let new_row = playlist_model.append();
-            if Some(song_ref) == song_to_select.as_ref() {
-                place_to_put_cursor = playlist_model.get_path(&new_row);
-            }
             let song = song_ref.read().unwrap();
-            playlist_model.set_value(&new_row, 0,
+            if songs_to_select.contains(&song.get_id()) {
+                playlist_model.get_path(&new_row)
+                    .map(|x| rows_to_select.push(x));
+            }
+            playlist_model.set_value(&new_row, SONG_ID_COLUMN,
                                      &song_id_to_value(song.get_id()));
             let weight = if Some(song_ref) == active_song {
                 // this is a doozy
@@ -634,18 +817,20 @@ impl Controller {
                 ACTIVE_WEIGHT
             }
             else { INACTIVE_WEIGHT };
-            playlist_model.set_value(&new_row, 1, &weight.to_value());
-            playlist_model.set_value(&new_row, 2, &song_index.to_value());
+            playlist_model.set_value(&new_row, SONG_WEIGHT_COLUMN,
+                                     &weight.to_value());
+            playlist_model.set_value(&new_row, SONG_INDEX_COLUMN,
+                                     &song_index.to_value());
             song_index += 1;
             total_duration = total_duration.saturating_add(song.get_duration());
             self.emplace_metadata(&playlist_model, &new_row,
-                                  playlist.get_columns(), &*song);
+                                  playlist.get_columns(),
+                                  &manual_songs, &*song);
         }
         self.playlist_view.set_model(Some(&playlist_model));
         self.playlist_model = Some(playlist_model);
-        if let Some(place) = place_to_put_cursor {
-            self.playlist_view.set_cursor::<TreeViewColumn>
-                (&place, None, false);
+        for wo in rows_to_select.into_iter() {
+            self.playlist_view.get_selection().select_path(&wo);
         }
         match song_index-1 {
             0 => self.playlist_stats.set_label("No songs in playlist"),
@@ -667,7 +852,8 @@ impl Controller {
     }
     fn activate_playlist_by_path(&mut self, wo: &TreePath) {
         let id = match self.playlists_model.get_iter(wo)
-            .map(|x| self.playlists_model.get_value(&x, 0))
+            .map(|x| self.playlists_model.get_value(&x, PLAYLIST_ID_COLUMN
+                                                    as i32))
             .and_then(value_to_playlist_id)
         {
             Some(id) => id,
@@ -697,7 +883,9 @@ impl Controller {
         drop(playlist);
         self.rebuild_playlist_view();
         let selection = self.playlists_view.get_selection();
-        selection.select_path(wo);
+        if selection.count_selected_rows() == 0 {
+            selection.select_path(wo);
+        }
     }
     fn periodic(&mut self, forced: bool) {
         self.update_view();
@@ -730,11 +918,25 @@ impl Controller {
         }
         self.periodic(true);
     }
+    fn force_periodic_soon(&mut self) {
+        let controller = match self.me.as_ref().and_then(Weak::upgrade) {
+            None => return,
+            Some(x) => x,
+        };
+        match self.periodic_timer.take() {
+            Some(x) => source_remove(x),
+            None => (),
+        }
+        self.periodic_timer = Some(timeout_add_local(0, move || {
+            controller.borrow_mut().periodic(false);
+            Continue(false)
+        }));
+    }
     fn change_future_playlist(&mut self, neu: Option<PlaylistRef>) {
         match self.last_active_playlist.as_ref() {
             Some((_, x)) if Some(x) == neu.as_ref() => { return },
             Some((iter, _)) => {
-                self.playlists_model.set_value(&iter, 2,
+                self.playlists_model.set_value(&iter, PLAYLIST_WEIGHT_COLUMN,
                                                &INACTIVE_WEIGHT.to_value());
             },
             None => (),
@@ -747,10 +949,13 @@ impl Controller {
                 let mut neu_iter = None;
                 self.playlists_model.foreach(|model, _, iter| -> bool {
                     let found_id
-                        = value_to_playlist_id(model.get_value(&iter, 0));
+                        = value_to_playlist_id(model.get_value
+                                               (&iter,
+                                                PLAYLIST_ID_COLUMN as i32));
                     if found_id == Some(search_id) {
                         model.downcast_ref::<TreeStore>().unwrap()
-                            .set_value(&iter, 2, &ACTIVE_WEIGHT.to_value());
+                            .set_value(&iter, PLAYLIST_WEIGHT_COLUMN,
+                                       &ACTIVE_WEIGHT.to_value());
                         neu_iter = Some(iter.clone());
                         true
                     }
@@ -766,45 +971,6 @@ impl Controller {
             None => (),
         }
         playback::set_future_playlist(neu);
-    }
-    fn reconnect_playlists_model(&mut self) -> Option<()> {
-        let controller = Weak::upgrade(self.me.as_ref().unwrap())?;
-        // NOT row-inserted, because that is called before the data is put in
-        // so we have no way of knowing which row it was! @_@
-        self.playlists_model.connect_row_changed(move |model, path, iter| {
-            let _ = controller.try_borrow_mut()
-                .map(|mut x| x.model_playlist_moved(model, path, iter));
-        });
-        None
-    }
-    fn model_playlist_moved(&mut self, model: &TreeStore, _path: &TreePath,
-                            iter: &TreeIter) -> Option<()> {
-        assert_eq!(&self.playlists_model, model);
-        let parent_iter = model.iter_parent(iter);
-        let sibling_iter = iter.clone();
-        let sibling_iter = if model.iter_next(&sibling_iter) {
-            Some(sibling_iter)
-        } else { None };
-        eprintln!("\n\n\nInserted!!!!!!!!!!!!!!!");
-        let id = value_to_playlist_id(model.get_value(&iter, 0))?;
-        eprintln!("id={:?}", id);
-        let fresh = playlist::get_playlist_by_id(id)?;
-        eprintln!("fresh={:?}", fresh);
-        let parent = parent_iter.and_then(|iter| {
-            value_to_playlist_id(model.get_value(&iter, 0))
-        }).and_then(playlist::get_playlist_by_id);
-        let sibling = sibling_iter.and_then(|iter| {
-            value_to_playlist_id(model.get_value(&iter, 0))
-        }).and_then(playlist::get_playlist_by_id);
-        eprintln!("   parent/sibling: {:?}, {:?}", parent, sibling);
-        // make sure all three playlists are unique
-        assert_ne!(Some(&fresh), parent.as_ref());
-        assert_ne!(Some(&fresh), sibling.as_ref());
-        if parent.is_some() && sibling.is_some() {
-            assert_ne!(parent, sibling);
-        }
-        fresh.move_next_to(parent, sibling);
-        None
     }
     fn update_view(&mut self) {
         let (status, active_song) = playback::get_status_and_active_song();
@@ -843,7 +1009,7 @@ impl Controller {
             let playlist_model = self.playlist_model.as_ref().unwrap();
             match self.last_active_song.as_ref() {
                 Some((Some(iter), _)) => {
-                    playlist_model.set_value(&iter, 1,
+                    playlist_model.set_value(&iter, SONG_WEIGHT_COLUMN,
                                              &INACTIVE_WEIGHT.to_value());
                 },
                 _ => (),
@@ -859,10 +1025,11 @@ impl Controller {
                     let mut neu_iter = None;
                     playlist_model.foreach(|model, _, iter| -> bool {
                         let found_id
-                            = value_to_song_id(model.get_value(&iter, 0));
+                            = value_to_song_id(model.get_value
+                                               (&iter, SONG_ID_COLUMN as i32));
                         if found_id == Some(search_id) {
                             model.downcast_ref::<ListStore>().unwrap()
-                                .set_value(&iter, 1,
+                                .set_value(&iter, SONG_WEIGHT_COLUMN,
                                            &ACTIVE_WEIGHT.to_value());
                             neu_iter = Some(iter.clone());
                             true
@@ -1004,7 +1171,8 @@ impl Controller {
                 let playlist_model = self.playlist_model.as_ref().unwrap();
                 self.playlist_view.get_cursor().0
                     .and_then(|x| playlist_model.get_iter(&x))
-                    .map(|x| playlist_model.get_value(&x, 0))
+                    .map(|x| playlist_model.get_value(&x,
+                                                      SONG_ID_COLUMN as i32))
                     .and_then(value_to_song_id)
                     .and_then(logical::get_song_by_song_id)
             } else { None };
@@ -1016,10 +1184,12 @@ impl Controller {
     fn edited_playlist_name_in_view(&self, wo: TreePath,
                                     nu: &str) -> Option<()> {
         let iter = self.playlists_model.get_iter(&wo)?;
-        let value = self.playlists_model.get_value(&iter, 0);
+        let value = self.playlists_model.get_value(&iter,
+                                                   PLAYLIST_ID_COLUMN as i32);
         let playlist = value_to_playlist_id(value)
             .and_then(playlist::get_playlist_by_id)?;
-        self.playlists_model.set_value(&iter, 1, &Value::from(nu));
+        self.playlists_model.set_value(&iter, PLAYLIST_NAME_COLUMN,
+                                       &Value::from(nu));
         if Some(&playlist) == self.active_playlist.as_ref() {
             self.playlist_name.set_text(&nu);
         }
@@ -1032,7 +1202,8 @@ impl Controller {
         let iter = self.playlists_model.get_iter(&wo)?;
         // TODO: make sure this is the right playlist!
         let nu = self.playlist_name.get_text().to_string();
-        self.playlists_model.set_value(&iter, 1, &nu.to_value());
+        self.playlists_model.set_value(&iter, PLAYLIST_NAME_COLUMN,
+                                       &nu.to_value());
         playlist.write().unwrap().set_name(nu.to_owned());
         None
     }
@@ -1044,7 +1215,7 @@ impl Controller {
     fn playlist_row_activated(&mut self, wo: &TreePath) -> Option<()> {
         let playlist_model = self.playlist_model.as_ref()?;
         let song = playlist_model.get_iter(wo)
-            .map(|x| playlist_model.get_value(&x, 0))
+            .map(|x| playlist_model.get_value(&x, PLAYLIST_ID_COLUMN as i32))
             .and_then(value_to_song_id)
             .and_then(logical::get_song_by_song_id);
         if let Some(song) = song {
@@ -1123,8 +1294,7 @@ impl Controller {
         None
     }
     fn delete_playlist_button_should_be_sensitive(&self) -> bool {
-        // TODO: better safety logic, and use TreeSelection::
-        // count_selected_rows()
+        // TODO: true if there is at least one top level playlist not selected
         playlist::get_top_level_playlists().len() > 1
     }
     fn clicked_delete_playlist(&mut self) -> Option<()> {
@@ -1138,7 +1308,8 @@ impl Controller {
         for wo in wo_list.iter() {
             let playlist = match wo.get_path()
                 .and_then(|x| self.playlists_model.get_iter(&x))
-                .map(|x| self.playlists_model.get_value(&x, 0))
+                .map(|x| self.playlists_model.get_value(&x, PLAYLIST_ID_COLUMN
+                                                        as i32))
                 .and_then(value_to_playlist_id)
                 .and_then(playlist::get_playlist_by_id)
             {
@@ -1150,10 +1321,11 @@ impl Controller {
             }
             playlist::delete_playlist(playlist);
         }
+        let expanded_playlist_ids = self.get_expanded_playlists();
         let (neu_model, _, neu_active_playlist) = build_playlists_model(&[]);
         self.playlists_model = neu_model;
-        self.reconnect_playlists_model();
         self.playlists_view.set_model(Some(&self.playlists_model));
+        self.expand_playlists(expanded_playlist_ids);
         self.last_active_playlist = neu_active_playlist;
         if self.active_playlist.is_none() {
             self.activate_playlist_by_path(&TreePath::new_first());
@@ -1243,7 +1415,7 @@ impl Controller {
         let selected_songs: Vec<SongID> =
             selected_rows.into_iter()
             .filter_map(|path| model.get_iter(&path))
-            .map(|iter| model.get_value(&iter, 0))
+            .map(|iter| model.get_value(&iter, SONG_ID_COLUMN as i32))
             .filter_map(value_to_song_id)
             .collect();
         self.playlist_edit_controller.as_ref().unwrap().borrow_mut()
@@ -1260,13 +1432,17 @@ impl Controller {
     -> anyhow::Result<()> {
         let playlist_model = self.playlist_model.as_ref().unwrap();
         let mut did_ok = true;
+        let manual_songs: HashSet<SongID>
+            = playlist.get_manual_songs().iter().map(|x| *x).collect();
         playlist_model.foreach(|model, _wo, iter| {
-            let id = value_to_song_id(model.get_value(iter, 0)).unwrap();
+            let id = value_to_song_id(model.get_value
+                                      (iter, SONG_ID_COLUMN as i32)).unwrap();
             if changed_songs.contains(&id) {
                 changed_songs.remove(&id);
                 if let Some(song_ref) = logical::get_song_by_song_id(id) {
                     self.emplace_metadata(playlist_model, iter,
                                           playlist.get_columns(),
+                                          &manual_songs,
                                           &song_ref.read().unwrap());
                 }
                 else {
@@ -1285,9 +1461,14 @@ impl Controller {
         }
     }
     fn emplace_metadata(&self, playlist_model: &ListStore, iter: &TreeIter,
-                        columns: &[playlist::Column], song: &LogicalSong) {
+                        columns: &[playlist::Column],
+                        manual_songs: &HashSet<SongID>,
+                        song: &LogicalSong) {
         let metadata = song.get_metadata();
-        let mut column_index: u32 = 3;
+        playlist_model.set_value(&iter, SONG_IS_MANUAL_COLUMN,
+                                 &manual_songs.contains(&song.get_id())
+                                 .to_value());
+        let mut column_index: u32 = SONG_FIRST_META_COLUMN;
         for column in columns {
             let s = if column.tag == "duration" {
                 pretty_duration(song.get_duration()).to_value()
@@ -1300,6 +1481,231 @@ impl Controller {
             playlist_model.set_value(&iter, column_index, &s);
             column_index += 1;
         }
+    }
+    fn get_expanded_playlists(&mut self) -> Vec<PlaylistID> {
+        let mut ret = Vec::new();
+        self.playlists_view.map_expanded_rows(|_, wo| {
+            self.playlists_model.get_iter(wo)
+                .map(|x| self.playlists_model.get_value(&x, PLAYLIST_ID_COLUMN
+                                                        as i32))
+                .and_then(value_to_playlist_id)
+                .map(|x| ret.push(x));
+        });
+        ret
+    }
+    fn expand_playlists(&mut self, mut playlist_ids: Vec<PlaylistID>) {
+        self.playlists_model.foreach(|playlists_model, wo, iter| {
+            let id = match value_to_playlist_id(playlists_model.get_value
+                                                (&iter, PLAYLIST_ID_COLUMN
+                                                 as i32)) {
+                Some(x) => x,
+                None => return playlist_ids.len() == 0,
+            };
+            for i in 0 .. playlist_ids.len() {
+                if playlist_ids[i] == id {
+                    playlist_ids.remove(i);
+                    self.playlists_view.expand_row(wo, false);
+                }
+            }
+            playlist_ids.len() == 0
+        });
+    }
+    fn dragged_playlists_in_playlist_list(&mut self,
+                                          data: &SelectionData,
+                                          wo: TreePath,
+                                          pos: TreeViewDropPosition,
+                                          _time: u32) -> (bool, bool) {
+        assert_eq!(data.get_format(), 8);
+        assert_eq!(data.get_length() % 8, 0);
+        let data = data.get_data();
+        let playlists: Vec<PlaylistRef> = data.chunks_exact(8)
+            .map(|x| PlaylistID::from_inner(u64::from_le_bytes(x.try_into()
+                                                               .unwrap())))
+            .filter_map(playlist::get_playlist_by_id)
+            .collect();
+        // TODO: make sure none of the selected playlists is a parent of the
+        // drop destination, again
+        let target_playlist_ref = match
+            self.playlists_model.get_iter(&wo)
+            .map(|x| self.playlists_model.get_value(&x, PLAYLIST_ID_COLUMN
+                                                    as i32))
+            .and_then(value_to_playlist_id)
+            .and_then(playlist::get_playlist_by_id) {
+                Some(x) => x,
+                None => {
+                    return (false, false)
+                },
+            };
+        use TreeViewDropPosition::*;
+        let (parent_ref, sibling_ref) = match pos {
+            IntoOrBefore | IntoOrAfter => {
+                (Some(target_playlist_ref), None)
+            },
+            Before => {
+                let target_playlist = target_playlist_ref.as_ref().read().unwrap();
+                let parent_ref = target_playlist.get_parent();
+                drop(target_playlist);
+                (parent_ref, Some(target_playlist_ref))
+            },
+            After => {
+                let target_playlist = target_playlist_ref.as_ref().read().unwrap();
+                let parent_ref = target_playlist.get_parent();
+                drop(target_playlist);
+                // not sure how to express this borrow safely, so let's clone
+                let siblings
+                    = parent_ref.as_ref().map(|x| x.read().unwrap()
+                                              .get_children().to_owned())
+                    .unwrap_or_else(|| playlist::get_top_level_playlists().clone());
+                let mut sibling_ref = None;
+                if siblings.len() > 1 {
+                    for n in 0 .. siblings.len() - 1 {
+                        if siblings[n] == target_playlist_ref {
+                            sibling_ref = Some(siblings[n+1].clone());
+                            break;
+                        }
+                    }
+                }
+                (parent_ref, sibling_ref)
+            },
+            _ => return (false, false)
+        };
+        for playlist_ref in playlists.iter() {
+            playlist_ref.move_next_to(parent_ref.as_ref(), sibling_ref.as_ref());
+        }
+        let expanded_playlist_ids = self.get_expanded_playlists();
+        let (neu_model, selected, _) = build_playlists_model(&playlists[..]);
+        self.playlists_model = neu_model;
+        self.playlists_view.set_model(Some(&self.playlists_model));
+        self.expand_playlists(expanded_playlist_ids);
+        for wo in selected.iter() {
+            self.playlists_view.get_selection().select_path(&wo);
+        }
+        // TODO: select the moved playlists
+        (true, false)
+    }
+    fn dragged_songs_onto_playlist_list(&mut self, data: &SelectionData,
+                                        wo: TreePath,
+                                        pos: TreeViewDropPosition,
+                                        _time: u32) -> (bool, bool) {
+        if pos != TreeViewDropPosition::IntoOrBefore
+            && pos != TreeViewDropPosition::IntoOrAfter {return (false,false)}
+        assert_eq!(data.get_format(), 8);
+        assert_eq!(data.get_length() % 8, 0);
+        let playlist_ref = match self.playlists_model.get_iter(&wo)
+            .map(|x| self.playlists_model.get_value(&x, PLAYLIST_ID_COLUMN
+                                                    as i32))
+            .and_then(value_to_playlist_id)
+            .and_then(playlist::get_playlist_by_id) {
+                Some(x) => x,
+                None => {
+                    return (false, false)
+                },
+            };
+        let data = data.get_data();
+        let song_ids: Vec<SongID> = data.chunks_exact(8)
+            .map(|x| SongID::from_inner(u64::from_le_bytes(x.try_into()
+                                                           .unwrap())))
+            .collect();
+        let mut songs_right = &song_ids[..];
+        let mut playlist = playlist_ref.write().unwrap();
+        let mut songs_left = playlist.get_manual_songs();
+        let mut new_songs = Vec::with_capacity
+            (songs_left.len() + songs_right.len());
+        // Merge the new songs onto the existing list, preserving sort and
+        // uniqueness
+        while !songs_left.is_empty() && !songs_right.is_empty() {
+            match songs_left[0].cmp(&songs_right[0]) {
+                Ordering::Less => {
+                    new_songs.push(songs_left[0]);
+                    songs_left = &songs_left[1..];
+                },
+                Ordering::Equal => {
+                    new_songs.push(songs_left[0]);
+                    songs_left = &songs_left[1..];
+                    songs_right = &songs_right[1..];
+                },
+                Ordering::Greater => {
+                    new_songs.push(songs_right[0]);
+                    songs_right = &songs_right[1..];
+                },
+            }
+        }
+        assert!(songs_left.is_empty() || songs_right.is_empty());
+        new_songs.extend_from_slice(songs_left);
+        new_songs.extend_from_slice(songs_right);
+        playlist.set_manual_songs(new_songs);
+        drop(playlist);
+        if Some(playlist_ref) == self.active_playlist {
+            self.rebuild_playlist_view();
+        }
+        (true, false)
+    }
+    fn delete_selected_songs(&mut self) -> Option<()> {
+        let active_playlist_ref = self.active_playlist.as_ref()?;
+        let mut active_playlist = active_playlist_ref.write().unwrap();
+        let selection = self.playlist_view.get_selection();
+        let playlist_model = self.playlist_model.as_ref().unwrap();
+        let (wo_list, _) = selection.get_selected_rows();
+        let mut new_manual_list = None;
+        for wo in wo_list.iter() {
+            let iter = match playlist_model.get_iter(wo) {
+                Some(x) => x,
+                None => continue,
+            };
+            let is_manual: bool = playlist_model.get_value
+                (&iter, SONG_IS_MANUAL_COLUMN as i32).get().unwrap()
+                .unwrap_or(false);
+            if is_manual {
+                playlist_model.set_value(&iter, SONG_IS_MANUAL_COLUMN,
+                                         &false.to_value());
+                if new_manual_list.is_none() {
+                    new_manual_list = Some(active_playlist.get_manual_songs()
+                                           .to_vec());
+                }
+                let id = match value_to_song_id
+                    (playlist_model.get_value(&iter, SONG_ID_COLUMN as i32)) {
+                        Some(x) => x,
+                        None => continue,
+                    };
+                let new_manual_list = new_manual_list.as_mut().unwrap();
+                match new_manual_list.iter().position(|x| x == &id) {
+                    None => (),
+                    Some(index) => { new_manual_list.remove(index); },
+                }
+            }
+        }
+        match new_manual_list {
+            None => (), // there were no manual songs
+            Some(new_manual_list) => {
+                active_playlist.set_manual_songs(new_manual_list);
+                drop(active_playlist);
+                self.rebuild_playlist_view();
+            },
+        }
+        None
+    }
+    fn delete_manual_song(&mut self, path: &str) -> Option<()> {
+        let wo = TreePath::from_string(path);
+        let playlist_model = self.playlist_model.as_ref().unwrap();
+        let iter = playlist_model.get_iter(&wo)?;
+        let song_id = value_to_song_id
+            (playlist_model.get_value(&iter, SONG_ID_COLUMN as i32))?;
+        playlist_model.set_value(&iter, SONG_IS_MANUAL_COLUMN,
+                                 &false.to_value());
+        let active_playlist_ref = self.active_playlist.as_ref()?;
+        let mut active_playlist = active_playlist_ref.write().unwrap();
+        let old_manual_list = active_playlist.get_manual_songs();
+        let new_manual_list = old_manual_list.iter()
+            .filter_map(|x| if *x == song_id { None } else { Some(*x) })
+            .collect();
+        if new_manual_list == old_manual_list { return None }
+        active_playlist.set_manual_songs(new_manual_list);
+        drop(active_playlist);
+        // We can't do `rebuild_playlist_view` in the signal handler directly,
+        // or GTK+ starts throwing assertion failures. So let's set a 0ms timer
+        // to do it instead.
+        self.force_periodic_soon();
+        None
     }
 }
 
@@ -1406,7 +1812,8 @@ impl RemoteTarget for Controller {
                 let playlist_model = self.playlist_model.as_ref().unwrap();
                 self.playlist_view.get_cursor().0
                     .and_then(|x| playlist_model.get_iter(&x))
-                    .map(|x| playlist_model.get_value(&x, 0))
+                    .map(|x| playlist_model.get_value(&x,
+                                                      SONG_ID_COLUMN as i32))
                     .and_then(value_to_song_id)
                     .and_then(logical::get_song_by_song_id)
             } else { None };
@@ -1607,7 +2014,7 @@ fn playlist_search_func(model: &TreeModel, _: i32, search_string: &str,
     let fuse = Fuse::default();
     let search_pattern = fuse.create_pattern(search_string);
     let num_columns = model.get_n_columns();
-    for n in 3..num_columns {
+    for n in SONG_FIRST_META_COLUMN as i32 .. num_columns {
         let value: Option<String> = model.get_value(&iter, n).get().unwrap();
         let value = match value {
             Some(x) => x,
@@ -1621,4 +2028,53 @@ fn playlist_search_func(model: &TreeModel, _: i32, search_string: &str,
         }
     }
     true
+}
+
+fn check_drag_onto_playlist<'a>
+    (playlists_view: &TreeView, context: &DragContext,
+     x: i32, y: i32, _time: u32,
+     tsong_songs_mimetype_atom: &'a Atom,
+     tsong_playlists_mimetype_atom: &'a Atom)
+-> Option<(TreePath, TreeViewDropPosition, DragAction, &'a Atom)> {
+    let targets = context.list_targets();
+    let target = match targets.get(0) {
+        None => return None,
+        Some(target) => target,
+    };
+    if target == tsong_songs_mimetype_atom {
+        let res = playlists_view.get_dest_row_at_pos(x, y);
+        match res {
+            Some((Some(wo), _)) =>
+                Some((wo, TreeViewDropPosition::IntoOrBefore,
+                      DragAction::LINK, tsong_songs_mimetype_atom)),
+            _ => None,
+        }
+    }
+    else if target == tsong_playlists_mimetype_atom {
+        let res = playlists_view.get_dest_row_at_pos(x, y);
+        match res {
+            Some((Some(wo), pos)) => {
+                // make sure none of the selected rows is either the target row
+                // or one of its parents
+                let selection = playlists_view.get_selection();
+                let (selected_rows, _model) = selection.get_selected_rows();
+                let mut check_row = wo.clone();
+                while check_row.get_depth() > 0 {
+                    if selected_rows.contains(&check_row) {
+                        return None
+                    }
+                    if !check_row.up() {
+                        break;
+                    }
+                }
+                Some((wo, pos,
+                      DragAction::MOVE, tsong_playlists_mimetype_atom))
+            },
+            _ => None,
+        }
+    }
+    // We don't have any other supported drag sources
+    else {
+        None
+    }
 }

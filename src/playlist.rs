@@ -212,6 +212,26 @@ impl Playlist {
         Ok(db::update_playlist_rule_code_and_columns(self.id, &self.rule_code,
                                                      &self.columns))
     }
+    /// Get the list of song IDs that were *manually added* to this playlist.
+    /// This list should always be sorted and free of duplicates.
+    pub fn get_manual_songs(&self) -> &[SongID] {
+        &self.manually_added_ids[..]
+    }
+    /// Change the list of manually added songs. The list must already be
+    /// sorted and free of duplicates.
+    pub fn set_manual_songs(&mut self, songs: Vec<SongID>) {
+        if self.manually_added_ids != songs {
+            self.manually_added_ids = songs;
+            match self.refresh() {
+                Err(x) =>
+                    eprintln!("Warning: Error during manually added song \
+                               refresh: {}", x),
+                _ => (),
+            }
+            db::update_playlist_manually_added_songs
+                (self.id, &self.manually_added_ids[..]);
+        }
+    }
     pub fn get_columns(&self) -> &[Column] { &self.columns[..] }
     pub fn resize_column(&mut self, tag: &str, width: u32) {
         for column in self.columns.iter_mut() {
@@ -224,6 +244,9 @@ impl Playlist {
     }
     pub fn get_sort_order(&self) -> &[(String,bool)] { &self.sort_order[..] }
     pub fn get_children(&self) -> &[PlaylistRef] { &self.children[..] }
+    pub fn get_parent(&self) -> Option<PlaylistRef> {
+        self.parent_id.and_then(get_playlist_by_id)
+    }
     pub fn get_playmode(&self) -> Playmode { self.playmode }
     pub fn set_playmode(&mut self, nu: Playmode) {
         self.playmode = nu;
@@ -643,9 +666,8 @@ impl PlaylistRef {
     /// Removes this playlist from its old place in the order, and move it to
     /// be a child of the given playlist (or top-level), before the other given
     /// playlist (or at the end).
-    pub fn move_next_to(&self, parent_ref: Option<PlaylistRef>,
-                        sibling_ref: Option<PlaylistRef>) {
-        eprintln!("move_next_to({:?}, {:?}, {:?})", self, parent_ref, sibling_ref);
+    pub fn move_next_to(&self, parent_ref: Option<&PlaylistRef>,
+                        sibling_ref: Option<&PlaylistRef>) {
         // The borrow checker did not want this function to be easy to write...
         let playlists_by_id = PLAYLISTS_BY_ID.write().unwrap();
         let mut victim = self.write().unwrap();
@@ -676,11 +698,10 @@ impl PlaylistRef {
                 &mut top_level_playlists
             },
         };
-        eprintln!("new parent ID: {:?}", victim.parent_id);
         db::update_playlist_parent_id(victim.id, victim.parent_id);
         drop(victim);
         let store_index = sibling_ref.and_then(|x| children.iter()
-                                               .position(|y| y == &x))
+                                               .position(|y| y == x))
             .unwrap_or_else(|| children.len());
         children.insert(store_index, self.clone());
         redo_parent_orders(&mut children[..]);
