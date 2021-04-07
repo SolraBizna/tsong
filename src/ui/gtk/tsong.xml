@@ -12,5 +12,6 @@
     <file compressed="true">icons/tsong-rolldown-symbolic.svg</file>
     <file compressed="true">icons/tsong-rollup-symbolic.svg</file>
     <file compressed="true">icons/tsong-shuffle-symbolic.svg</file>
+    <file compressed="true">icons/tsong-settings-symbolic.svg</file>
   </gresource>
 </gresources>
