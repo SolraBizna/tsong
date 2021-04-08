@@ -367,6 +367,7 @@ impl Playlist {
                 }
             }
         }
+        self.unsorted_songs.sort_by(|a,b| a.read().unwrap().get_id().cmp(&b.read().unwrap().get_id()));
         if self.unsorted_songs != new_songs {
             self.unsorted_songs = new_songs;
             self.resort();
