@@ -832,3 +832,11 @@ pub fn set_mute(nu: bool) {
     let mut state = STATE.lock().unwrap();
     state.muted = nu;
 }
+
+/// Given a specific user-visible "volume level", give the attenuation in
+/// decibels.
+pub fn volume_to_db(level: i32) -> f64 {
+    let amplitude = (level as f64) / 100.0;
+    let asq = amplitude * amplitude;
+    asq.log10() * 10.0
+}

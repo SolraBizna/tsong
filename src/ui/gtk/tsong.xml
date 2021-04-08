@@ -14,5 +14,7 @@
     <file compressed="true">icons/tsong-shuffle-symbolic.svg</file>
     <file compressed="true">icons/tsong-settings-symbolic.svg</file>
     <file compressed="true">icons/tsong-delete-manual-song-symbolic.svg</file>
+    <file compressed="true">icons/tsong-volume-quiet-symbolic.svg</file>
+    <file compressed="true">icons/tsong-volume-loud-symbolic.svg</file>
   </gresource>
 </gresources>

@@ -2,6 +2,7 @@ use crate::*;
 use fuse_rust::Fuse;
 use gtk::{
     prelude::*,
+    Adjustment,
     Align,
     Allocation,
     Application,
@@ -21,9 +22,10 @@ use gtk::{
     ListStore,
     MessageDialog, MessageType,
     Orientation,
-    Overlay,
+    Overlay, OverlayBuilder,
     PolicyType,
     ResponseType,
+    Scale, ScaleBuilder,
     ScrolledWindowBuilder,
     SelectionData,
     SelectionMode,
@@ -35,7 +37,6 @@ use gtk::{
     TreeIter, TreePath, TreeStore, TreeRowReference,
     TreeModel, TreeModelFlags,
     TreeView, TreeViewBuilder, TreeViewColumn, TreeViewDropPosition,
-    VolumeButton, VolumeButtonBuilder,
     Widget,
 };
 use gdk::{
@@ -109,7 +110,7 @@ pub struct Controller {
     rollup_grid: Grid,
     settings_button: ToggleButton,
     shuffle_button: ToggleButton,
-    volume_button: VolumeButton,
+    volume_scale: Scale,
     window: ApplicationWindow,
     playlist_generation: GenerationValue,
     scan_spinner: Spinner,
@@ -184,12 +185,39 @@ impl Controller {
             .name("next").build();
         control_button_add(&control_box, &next_button, &["circular"]);
         // Volume slider:
-        let volume_button = VolumeButtonBuilder::new()
-            .name("volume")
-            .margin_top(7).margin_bottom(7)
-            .value(prefs::get_volume() as f64 / 100.0)
+        let volume_overlay = OverlayBuilder::new()
+            .name("volume").build();
+        let quiet_icon = Image::from_icon_name(Some("tsong-volume-quiet"),
+                                               IconSize::LargeToolbar);
+        quiet_icon.set_widget_name("quiet");
+        quiet_icon.set_halign(Align::Start);
+        quiet_icon.set_valign(Align::Center);
+        let loud_icon = Image::from_icon_name(Some("tsong-volume-loud"),
+                                               IconSize::LargeToolbar);
+        loud_icon.set_widget_name("loud");
+        loud_icon.set_halign(Align::End);
+        loud_icon.set_valign(Align::Center);
+        let volume_scale = ScaleBuilder::new()
+            .has_origin(true)
+            .hexpand(true)
+            .draw_value(false)
+            .show_fill_level(true)
+            .fill_level(100.0)
+            .restrict_to_fill_level(false)
+            .adjustment(&Adjustment::new(prefs::get_volume() as f64,
+                                         0.0, 200.0, 1.0, 10.0, 10.0))
             .build();
-        control_box.add(&volume_button);
+        let volume_label = LabelBuilder::new()
+            .halign(Align::Center).valign(Align::Center).build();
+        set_volume_label(&volume_scale, &volume_label);
+        volume_overlay.add_overlay(&quiet_icon);
+        volume_overlay.add_overlay(&volume_label);
+        volume_overlay.add_overlay(&loud_icon);
+        volume_overlay.add_overlay(&volume_scale);
+        control_box.add(&volume_overlay);
+        volume_scale.connect_value_changed(move |volume_scale| {
+            set_volume_label(volume_scale, &volume_label)
+        });
         // Button to "roll up" the playlist box:
         let rollup_button = ButtonBuilder::new()
             .name("rollup").build();
@@ -394,7 +422,7 @@ impl Controller {
         let (song_meta_update_tx, song_meta_update_rx) = mpsc::channel();
         let nu = Rc::new(RefCell::new(Controller {
             rollup_button, settings_button, prev_button, next_button,
-            shuffle_button, playmode_button, play_button, volume_button,
+            shuffle_button, playmode_button, play_button, volume_scale,
             playlists_view, playlist_view,
             playlists_model, playlist_model, playlist_stats, osd,
             scan_spinner, scan_thread, rollup_grid, control_box,
@@ -423,9 +451,9 @@ impl Controller {
             .set_sensitive(this.delete_playlist_button_should_be_sensitive());
         this.playlists_view.append_column(&this.playlist_name_column);
         let controller = nu.clone();
-        this.volume_button.connect_value_changed(move |_, value| {
+        this.volume_scale.connect_value_changed(move |scale| {
             let _ = controller.try_borrow_mut()
-                .map(|mut x| x.update_volume(value));
+                .map(|mut x| x.update_volume(scale.get_value()));
         });
         this.prev_button.connect_clicked(|_| {
             playback::send_command(PlaybackCommand::Prev)
@@ -884,6 +912,7 @@ context.drag_finish(res.0, res.1, time);
         self.update_scan_status();
         self.maybe_update_playlist();
         if self.volume_changed {
+            // TODO: do prefs updates in the background?
             match prefs::write() {
                 Ok(_) => (),
                 Err(x) => {
@@ -1384,7 +1413,7 @@ context.drag_finish(res.0, res.1, time);
         self.force_periodic();
     }
     fn update_volume(&mut self, nu: f64) {
-        prefs::set_volume((nu * 100.0).floor() as i32);
+        prefs::set_volume(nu.floor() as i32);
         if nu > 0.0 {
             playback::set_mute(false);
         }
@@ -1723,7 +1752,7 @@ impl RemoteTarget for Controller {
         let cur_volume = prefs::get_volume();
         let nu_volume = (cur_volume - 5).max(prefs::MIN_VOLUME);
         if cur_volume == nu_volume { return None }
-        self.volume_button.set_value(nu_volume as f64 / 100.0);
+        self.volume_scale.set_value(nu_volume as f64);
         prefs::set_volume(nu_volume);
         if nu_volume > 0 {
             playback::set_mute(false);
@@ -1735,7 +1764,7 @@ impl RemoteTarget for Controller {
         let cur_volume = prefs::get_volume();
         let nu_volume = (cur_volume + 5).max(prefs::MAX_VOLUME);
         if cur_volume == nu_volume { return None }
-        self.volume_button.set_value(nu_volume as f64 / 100.0);
+        self.volume_scale.set_value(nu_volume as f64);
         prefs::set_volume(nu_volume);
         playback::set_mute(false);
         self.volume_changed = true;
@@ -1744,11 +1773,11 @@ impl RemoteTarget for Controller {
     fn remote_mute(&mut self) -> Option<()> {
         if playback::toggle_mute() {
             // we are now muted
-            self.volume_button.set_value(0.0);
+            self.volume_scale.set_value(0.0);
         }
         else {
             // we are no longer muted
-            self.volume_button.set_value(prefs::get_volume() as f64 / 100.0);
+            self.volume_scale.set_value(prefs::get_volume() as f64);
         }
         // note: we don't actually set the playback volume here, but if the
         // user manipulates the slider, everything should work out how they
@@ -1756,8 +1785,8 @@ impl RemoteTarget for Controller {
         None
     }
     fn remote_set_volume(&mut self, nu: f64) -> Option<()> {
-        self.volume_button.set_value(nu);
         let nu = (nu.max(0.0).min(2.0) * 100.0 + 0.5).floor() as i32;
+        self.volume_scale.set_value(nu as f64);
         prefs::set_volume(nu);
         playback::set_mute(false);
         self.volume_changed = true;
@@ -2065,5 +2094,22 @@ fn check_drag_onto_playlist<'a>
     // We don't have any other supported drag sources
     else {
         None
+    }
+}
+
+fn set_volume_label(scale: &Scale, label: &Label) {
+    let val = scale.get_value().floor().min(200.0).max(0.0) as i32;
+    if val > 100 {
+        label.get_style_context().add_class("overblood");
+    }
+    else {
+        label.get_style_context().remove_class("overblood");
+    }
+    if val > 0 {
+        let db = playback::volume_to_db(val);
+        label.set_label(&format!("{}% ({:+.2}dB)", val, db))
+    }
+    else {
+        label.set_label("Muted"); // TODO: i18n
     }
 }

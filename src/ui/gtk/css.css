@@ -33,9 +33,13 @@
     min-width: 46px;
     min-height: 46px;
 }
-#playlist_stats {
+#playlist_stats, #volume label {
     opacity: 0.5;
 }
+#volume label {
+    font-size: 75%;
+}
+.overblood { color: #f00; }
 #playlists {
     min-width: 150px;
 }
@@ -54,3 +58,8 @@ box#settings, box#editor {
 box#editor scrolledwindow#columns {
     min-height: 200px;
 }
+#volume image, #volume label { margin-bottom: 18px; }
+#volume scale { margin-top: 18px; }
+#volume image#quiet { margin-left: 8px; }
+#volume image#loud { margin-right: 8px; }
+#volume { min-width: 120px; }
