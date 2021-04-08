@@ -372,6 +372,61 @@ fn playback_thread(state: Arc<Mutex<InternalState>>,
             // - User changed the audio device. (TODO)
             // - We hit the end of the playlist and looping isn't enabled.
             //   Finish up. (This might be handled elsewhere?)
+            // But before we can do anything else, there might be some more
+            // playback commands we want to handle... Yay, code duplication!
+            while let Some(message) = playback_control_rx.try_recv().ok() {
+                // We manually break from this loop if and only if we change
+                // the playback status.
+                match message {
+                    // this shouldn't happen but is harmless
+                    PlaybackThreadMessage::CallbackRan => (),
+                    PlaybackThreadMessage::Command(cmd) => {
+                        match cmd {
+                            Stop => {
+                                let mut state = state.lock().unwrap();
+                                state.status = PlaybackStatus::Stopped;
+                                state.future_song = None;
+                                state.future_stream = None;
+                                break;
+                            },
+                            Pause => {
+                                let mut state = state.lock().unwrap();
+                                state.status = PlaybackStatus::Paused;
+                                break;
+                            },
+                            Play(Some(song)) => {
+                                let mut state = state.lock().unwrap();
+                                state.future_song = Some(song);
+                                state.future_stream = None;
+                            },
+                            Play(None) => (), // nothing to do
+                            Next => {
+                                let mut state = state.lock().unwrap();
+                                state.next_song();
+                            },
+                            Prev => {
+                                let mut state = state.lock().unwrap();
+                                state.future_stream = None;
+                                match state.active_song.as_mut() {
+                                    Some((song,when)) if *when >= 5.0 => {
+                                        // Actually, start the current song
+                                        // over instead.
+                                        *when = 0.0;
+                                        state.future_song = Some(song.clone());
+                                    },
+                                    _ => {
+                                        state.prev_song();
+                                    },
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // in case the status changed above
+            if state.lock().unwrap().status != PlaybackStatus::Playing {
+                break
+            }
             let (sample_rate, channel_count) = {
                 decode_some_frames(&state);
                 // double lock in the common case :(
