@@ -13,7 +13,7 @@ use gtk::{
     Container,
     DestDefaults,
     DialogFlags,
-    Entry, EntryBuilder,
+    Entry,
     Grid, GridBuilder,
     IconSize, IconTheme,
     Image,
@@ -95,7 +95,6 @@ pub struct Controller {
     next_button: Button,
     osd: Label,
     play_button: Button,
-    playlist_name: Entry,
     playlist_model: Option<ListStore>,
     playlist_name_cell: CellRendererText,
     playlist_name_column: TreeViewColumn,
@@ -224,8 +223,31 @@ impl Controller {
         playlist_button_box.add(&new_playlist_button);
         rollup_grid.attach(&playlist_button_box, 0, 1, 1, 1);
         // and the play...list
-        let playlist_itself_box = BoxBuilder::new()
-            .name("playlist").orientation(Orientation::Vertical).build();
+        let playlist_window = ScrolledWindowBuilder::new()
+            .hscrollbar_policy(PolicyType::Automatic)
+            .vscrollbar_policy(PolicyType::Automatic)
+            .vexpand(true).hexpand(true)
+            .build();
+        let playlist_view = TreeViewBuilder::new().expand(true)
+            .headers_visible(true).build();
+        playlist_view.set_search_equal_func(playlist_search_func);
+        playlist_view.get_selection().set_mode(SelectionMode::Multiple);
+        playlist_window.add(&playlist_view);
+        rollup_grid.attach(&playlist_window, 2, 0, 1, 1);
+        // Playlist stats and controls
+        let below_playlist_box = BoxBuilder::new()
+            .name("below_playlist").orientation(Orientation::Horizontal)
+            .build();
+        // Playlist stats
+        let bottom_overlay = Overlay::new();
+        let playlist_stats = LabelBuilder::new()
+            .name("playlist_stats").build();
+        bottom_overlay.add(&playlist_stats);
+        let scan_spinner = SpinnerBuilder::new().name("scan_spinner")
+            .halign(Align::Start).valign(Align::Center).build();
+        bottom_overlay.add_overlay(&scan_spinner);
+        below_playlist_box.pack_start(&bottom_overlay, true, true, 0);
+        // buttons!
         let playlist_control_box = ButtonBoxBuilder::new()
             .name("meta").layout_style(ButtonBoxStyle::Expand)
             .homogeneous(false)
@@ -240,36 +262,12 @@ impl Controller {
         let playmode_button = ToggleButtonBuilder::new()
             .name("playmode").build();
         playlist_control_box.pack_start(&playmode_button, false, false, 0);
-        // The playlist name:
-        let playlist_name = EntryBuilder::new().hexpand(true)
-            .build();
-        playlist_control_box.pack_start(&playlist_name, true, true, 0);
         // Button to edit playlist settings:
         let playlist_edit_button = ToggleButtonBuilder::new()
             .name("edit_playlist").label("Edit").build();
         playlist_control_box.pack_end(&playlist_edit_button, false, false, 0);
-        playlist_itself_box.add(&playlist_control_box);
-        // The playlist itself:
-        let playlist_window = ScrolledWindowBuilder::new()
-            .hscrollbar_policy(PolicyType::Automatic)
-            .vscrollbar_policy(PolicyType::Automatic)
-            .vexpand(true).hexpand(true)
-            .build();
-        let playlist_view = TreeViewBuilder::new().expand(true)
-            .headers_visible(true).build();
-        playlist_view.set_search_equal_func(playlist_search_func);
-        playlist_view.get_selection().set_mode(SelectionMode::Multiple);
-        playlist_window.add(&playlist_view);
-        playlist_itself_box.add(&playlist_window);
-        rollup_grid.attach(&playlist_itself_box, 2, 0, 1, 1);
-        let bottom_overlay = Overlay::new();
-        let playlist_stats = LabelBuilder::new()
-            .name("playlist_stats").build();
-        bottom_overlay.add(&playlist_stats);
-        let scan_spinner = SpinnerBuilder::new().name("scan_spinner")
-            .halign(Align::End).valign(Align::Center).build();
-        bottom_overlay.add_overlay(&scan_spinner);
-        rollup_grid.attach(&bottom_overlay, 2, 1, 1, 1);
+        below_playlist_box.pack_start(&playlist_control_box, false, false, 0);
+        rollup_grid.attach(&below_playlist_box, 2, 1, 1, 1);
         outer_box.add(&rollup_grid);
         // done setting up the widgets, time to bind everything to the
         // controller
@@ -397,7 +395,7 @@ impl Controller {
         let nu = Rc::new(RefCell::new(Controller {
             rollup_button, settings_button, prev_button, next_button,
             shuffle_button, playmode_button, play_button, volume_button,
-            playlists_view, playlist_view, playlist_name,
+            playlists_view, playlist_view,
             playlists_model, playlist_model, playlist_stats, osd,
             scan_spinner, scan_thread, rollup_grid, control_box,
             new_playlist_button, delete_playlist_button,
@@ -428,11 +426,6 @@ impl Controller {
         this.volume_button.connect_value_changed(move |_, value| {
             let _ = controller.try_borrow_mut()
                 .map(|mut x| x.update_volume(value));
-        });
-        let controller = nu.clone();
-        this.playlist_name.connect_property_text_notify(move |_| {
-            let _ = controller.try_borrow()
-                .map(|x| x.edited_playlist_name_in_entry());
         });
         this.prev_button.connect_clicked(|_| {
             playback::send_command(PlaybackCommand::Prev)
@@ -879,7 +872,6 @@ context.drag_finish(res.0, res.1, time);
                                              .cloned()));
         self.playlist_generation.destroy();
         let playlist = playlist_ref.read().unwrap();
-        self.playlist_name.set_text(playlist.get_name());
         drop(playlist);
         self.rebuild_playlist_view();
         let selection = self.playlists_view.get_selection();
@@ -1190,20 +1182,6 @@ context.drag_finish(res.0, res.1, time);
             .and_then(playlist::get_playlist_by_id)?;
         self.playlists_model.set_value(&iter, PLAYLIST_NAME_COLUMN,
                                        &Value::from(nu));
-        if Some(&playlist) == self.active_playlist.as_ref() {
-            self.playlist_name.set_text(&nu);
-        }
-        playlist.write().unwrap().set_name(nu.to_owned());
-        None
-    }
-    fn edited_playlist_name_in_entry(&self) -> Option<()> {
-        let playlist = self.active_playlist.as_ref()?;
-        let wo = self.playlists_view.get_cursor().0?;
-        let iter = self.playlists_model.get_iter(&wo)?;
-        // TODO: make sure this is the right playlist!
-        let nu = self.playlist_name.get_text().to_string();
-        self.playlists_model.set_value(&iter, PLAYLIST_NAME_COLUMN,
-                                       &nu.to_value());
         playlist.write().unwrap().set_name(nu.to_owned());
         None
     }
