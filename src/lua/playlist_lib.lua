@@ -30,12 +30,15 @@ function metafetch_mt.__index(_, k)
    -- no result? empty string
    if ret == nil then return "" end
    -- looks like a number? try returning it as a number
+   -- actually, don't, as this breaks the tools above
+   --[[
    if ret:match("^[0-9]+$") then
       local as_integer = math.tointeger(ret)
       if tostring(as_integer) == ret then
          return as_integer
       end
    end
+   ]]
    -- okay, just return it
    return ret
 end
