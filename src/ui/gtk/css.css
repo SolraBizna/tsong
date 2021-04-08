@@ -62,4 +62,4 @@ box#editor scrolledwindow#columns {
 #volume scale { margin-top: 18px; }
 #volume image#quiet { margin-left: 8px; }
 #volume image#loud { margin-right: 8px; }
-#volume { min-width: 120px; }
+#volume #fake { min-width: 160px; }

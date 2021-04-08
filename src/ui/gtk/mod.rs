@@ -186,7 +186,9 @@ impl Controller {
         control_button_add(&control_box, &next_button, &["circular"]);
         // Volume slider:
         let volume_overlay = OverlayBuilder::new()
-            .name("volume").build();
+            .name("volume").expand(false).build();
+        let volume_box = BoxBuilder::new()
+            .name("fake").expand(false).build();
         let quiet_icon = Image::from_icon_name(Some("tsong-volume-quiet"),
                                                IconSize::LargeToolbar);
         quiet_icon.set_widget_name("quiet");
@@ -199,7 +201,6 @@ impl Controller {
         loud_icon.set_valign(Align::Center);
         let volume_scale = ScaleBuilder::new()
             .has_origin(true)
-            .hexpand(true)
             .draw_value(false)
             .show_fill_level(true)
             .fill_level(100.0)
@@ -210,6 +211,7 @@ impl Controller {
         let volume_label = LabelBuilder::new()
             .halign(Align::Center).valign(Align::Center).build();
         set_volume_label(&volume_scale, &volume_label);
+        volume_overlay.add(&volume_box);
         volume_overlay.add_overlay(&quiet_icon);
         volume_overlay.add_overlay(&volume_label);
         volume_overlay.add_overlay(&loud_icon);
