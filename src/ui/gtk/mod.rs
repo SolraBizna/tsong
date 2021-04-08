@@ -1385,6 +1385,9 @@ context.drag_finish(res.0, res.1, time);
     }
     fn update_volume(&mut self, nu: f64) {
         prefs::set_volume((nu * 100.0).floor() as i32);
+        if nu > 0.0 {
+            playback::set_mute(false);
+        }
         self.volume_changed = true;
     }
     fn update_selected_songs(&self) {
@@ -1722,6 +1725,9 @@ impl RemoteTarget for Controller {
         if cur_volume == nu_volume { return None }
         self.volume_button.set_value(nu_volume as f64 / 100.0);
         prefs::set_volume(nu_volume);
+        if nu_volume > 0 {
+            playback::set_mute(false);
+        }
         self.volume_changed = true;
         None
     }
@@ -1731,6 +1737,7 @@ impl RemoteTarget for Controller {
         if cur_volume == nu_volume { return None }
         self.volume_button.set_value(nu_volume as f64 / 100.0);
         prefs::set_volume(nu_volume);
+        playback::set_mute(false);
         self.volume_changed = true;
         None
     }
@@ -1743,12 +1750,16 @@ impl RemoteTarget for Controller {
             // we are no longer muted
             self.volume_button.set_value(prefs::get_volume() as f64 / 100.0);
         }
+        // note: we don't actually set the playback volume here, but if the
+        // user manipulates the slider, everything should work out how they
+        // expect
         None
     }
     fn remote_set_volume(&mut self, nu: f64) -> Option<()> {
         self.volume_button.set_value(nu);
         let nu = (nu.max(0.0).min(2.0) * 100.0 + 0.5).floor() as i32;
         prefs::set_volume(nu);
+        playback::set_mute(false);
         self.volume_changed = true;
         None
     }

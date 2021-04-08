@@ -826,3 +826,9 @@ pub fn toggle_mute() -> bool {
     state.muted = !state.muted;
     state.muted
 }
+
+/// Set the mute state.
+pub fn set_mute(nu: bool) {
+    let mut state = STATE.lock().unwrap();
+    state.muted = nu;
+}
