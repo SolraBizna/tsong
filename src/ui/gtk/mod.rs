@@ -175,15 +175,15 @@ impl Controller {
         let play_button = ButtonBuilder::new()
             .name("playpause").build();
         control_button_add(&control_box, &play_button, &["circular"]);
+        // Button to go to the next song in the playlist:
+        let next_button = ButtonBuilder::new()
+            .name("next").build();
+        control_button_add(&control_box, &next_button, &["circular"]);
         // Osd widget!
         let osd = LabelBuilder::new()
             .name("osd")
             .hexpand(true).build();
         control_box.add(&osd);
-        // Button to go to the next song in the playlist:
-        let next_button = ButtonBuilder::new()
-            .name("next").build();
-        control_button_add(&control_box, &next_button, &["circular"]);
         // Volume slider:
         let volume_overlay = OverlayBuilder::new()
             .name("volume").expand(false).build();
