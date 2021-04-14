@@ -213,6 +213,7 @@ fn search_thread_body(rescan_request_rx: mpsc::Receiver<Vec<String>>,
                 }
             }
         }
+        logical::maybe_recreate_recs();
         scans_left.fetch_sub(1, Ordering::SeqCst);
         match scan_result_tx.send(Ok(())) {
             Ok(_) => (),

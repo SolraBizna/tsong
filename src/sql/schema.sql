@@ -1,18 +1,18 @@
-PRAGMA user_version = 2;
+PRAGMA user_version = 3;
 
 CREATE TABLE PhysicalFiles(
        id BINARY(16) PRIMARY KEY,
        size INTEGER NOT NULL,
        duration INTEGER NOT NULL,
-       relative_paths BLOB NOT NULL,
-       raw_meta BLOB NOT NULL
+       relative_paths BLOB NOT NULL
 );
 
 CREATE TABLE LogicalSongs(
        id INTEGER PRIMARY KEY AUTOINCREMENT,
        user_metadata BLOB NOT NULL,
        physical_files BLOB NOT NULL,
-       duration INTEGER
+       duration INTEGER,
+       similarity_recs BLOB
 );
 
 CREATE TABLE Playlists(

@@ -6,6 +6,7 @@
 use crate::*;
 use lazy_static::lazy_static;
 use arrayref::array_ref;
+use atomic_take::AtomicTake;
 
 use std::{
     collections::{BTreeMap, HashMap, hash_map::Entry},
@@ -94,9 +95,9 @@ pub struct PhysicalFile {
     /// as a shortcut (in combination with size) to prevent having to rescan
     /// every file on every startup.
     relative_paths: Vec<String>,
-    /// Raw metadata, exactly as returned by FFMPEG.
-    raw_meta: BTreeMap<String,String>,
     // Not serialized in database
+    /// Raw metadata, exactly as returned by FFMPEG.
+    raw_meta: AtomicTake<BTreeMap<String,String>>,
     /// All absolute paths under which we've seen this file since startup. Used
     /// to actually find the file when it's time to play.
     absolute_paths: Vec<PathBuf>,
@@ -109,8 +110,31 @@ impl PhysicalFile {
     pub fn get_absolute_paths(&self) -> &[PathBuf] {
         &self.absolute_paths[..]
     }
-    pub fn get_raw_metadata(&self) -> &BTreeMap<String, String> {
-        &self.raw_meta
+    /// Reads the raw metadata from the file.
+    ///
+    /// Note: If the file was just discovered for the first time, this will be
+    /// cached, BUT ONLY ONCE. Under most circumstances, this opens the file
+    /// to read its metadata!
+    pub fn get_raw_metadata(&self) -> BTreeMap<String, String> {
+        if let Some(meta) = self.raw_meta.take() {
+            return meta;
+        }
+        for path in self.absolute_paths.iter() {
+            match try_read_metadata(path) {
+                Ok(x) => {
+                    return x
+                },
+                Err(x) => {
+                    eprintln!("Error trying to read metadata from {:?}: \
+                               {}", path, x);
+                },
+            }
+        }
+        let mut nu = BTreeMap::new();
+        nu.insert("metadata_load_error".to_owned(),
+                  "Couldn't load any metadata from this file."
+                  .to_owned());
+        nu
     }
     pub fn get_duration(&self) -> u32 {
         self.duration
@@ -132,8 +156,7 @@ lazy_static! {
 
 /// Called by the database during initial database load.
 pub fn add_file_from_db(id: FileID, size: u64, duration: u32,
-                        relative_paths: Vec<String>,
-                        raw_meta: BTreeMap<String, String>) {
+                        relative_paths: Vec<String>) {
     let mut physical_files = PHYSICAL_FILES.write().unwrap();
     let mut files_by_relative_path = FILES_BY_RELATIVE_PATH.write().unwrap();
     let neu_ref = match physical_files.entry(id) {
@@ -144,8 +167,8 @@ pub fn add_file_from_db(id: FileID, size: u64, duration: u32,
         },
         Entry::Vacant(ent) => {
             let record = PhysicalFileRef::new(PhysicalFile {
-                id, size, raw_meta, duration, relative_paths,
-                absolute_paths: vec![],
+                id, size, raw_meta: AtomicTake::empty(), duration,
+                relative_paths, absolute_paths: vec![],
             });
             ent.insert(record.clone());
             record
@@ -222,10 +245,6 @@ pub fn scanned_file(id: &FileID, size: u64, _mtime: u64, duration: u32,
                                             duration? (durations are {} and \
                                             {})", duration, record.duration))
                     }
-                    if raw_meta != record.raw_meta {
-                        return Err(anyhow!("Same physical file, different \
-                                            physical metadata?"))
-                    }
                     match record.relative_paths.iter()
                         .find(|x| *x == relative_path) {
                             None => {
@@ -243,13 +262,14 @@ pub fn scanned_file(id: &FileID, size: u64, _mtime: u64, duration: u32,
             },
             Entry::Vacant(ent) => {
                 let record_ref = PhysicalFileRef::new(PhysicalFile {
-                    id: *id, size, raw_meta, duration,
+                    id: *id, size, duration,
+                    raw_meta: AtomicTake::new(raw_meta),
                     relative_paths: vec![relative_path.to_owned()],
                     absolute_paths: vec![absolute_path.to_owned()],
                 });
                 ent.insert(record_ref.clone());
                 let record = record_ref.read().unwrap();
-                db::add_file(&record.id, record.size, &record.raw_meta,
+                db::add_file(&record.id, record.size,
                              record.duration, &record.relative_paths);
                 drop(record);
                 record_ref
@@ -292,4 +312,16 @@ pub fn open_stream(id: &FileID) -> Option<ffmpeg::AVFormat> {
 
 pub fn get_file_by_id(id: &FileID) -> Option<PhysicalFileRef> {
     PHYSICAL_FILES.read().unwrap().get(id).cloned()
+}
+
+fn try_read_metadata(path: &Path) -> anyhow::Result<BTreeMap<String,String>> {
+    let mut avf = ffmpeg::AVFormat::open_input(&path)?;
+    avf.find_stream_info()?;
+    let best_stream_id = match avf.find_best_stream()? {
+        Some(x) => x,
+        None => {
+            return Err(anyhow!("Not a music file?"))
+        }
+    };
+    Ok(avf.read_metadata(Some(best_stream_id)))
 }

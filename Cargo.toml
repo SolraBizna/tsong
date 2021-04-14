@@ -25,6 +25,7 @@ rusqlite = "0.24.2"
 serde = {version = "1.0", features = ["derive"]}
 serde_json = "1.0"
 fuse-rust = "0.2"
+atomic-take = "1.0"
 
 [features]
 default = ["mpris"]

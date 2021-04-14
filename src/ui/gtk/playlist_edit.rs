@@ -1006,7 +1006,7 @@ impl Controller {
                         },
                     };
                 let file = file.read().unwrap();
-                match song.import_metadata(&*file) {
+                match song.import_metadata(&*file, None) {
                     Ok(false) => (),
                     Ok(true) => {
                         let _ = song_meta_update_tx.send(song.get_id());
@@ -1040,7 +1040,7 @@ impl Controller {
                         },
                     };
                 let file = file.read().unwrap();
-                let imported = match song.get_imported_metadata(&*file) {
+                let imported = match song.get_imported_metadata(&*file, None) {
                     Ok(x) => x,
                     Err(x) => {
                         drop(song);

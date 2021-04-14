@@ -75,6 +75,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "atomic-take"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9f65e4fb35ff6a80b3298d1f028649f3a23da141fa3951e9b24dde1d515b67e"
+
+[[package]]
 name = "atty"
 version = "0.2.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1272,6 +1278,7 @@ dependencies = [
  "alphanumeric-sort",
  "anyhow",
  "arrayref",
+ "atomic-take",
  "ffmpeg-dev",
  "fuse-rust",
  "gdk",
