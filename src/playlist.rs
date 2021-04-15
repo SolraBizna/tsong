@@ -283,21 +283,21 @@ impl Playlist {
         self.shuffled = false;
         db::update_playlist_sort_order_and_disable_shuffle(self.id,
                                                          &self.sort_order[..]);
-        self.resort();
+        self.resort(false);
     }
     /// The user wants to toggle shuffle mode. Returns whether shuffle is now
     /// enabled
     pub fn toggle_shuffle(&mut self) -> bool {
         self.shuffled = !self.shuffled;
         db::update_playlist_shuffled(self.id, self.shuffled);
-        self.resort();
+        self.resort(false);
         self.shuffled
     }
     pub fn set_shuffle(&mut self, shuffled: bool) {
         if self.shuffled != shuffled {
             self.shuffled = shuffled;
             db::update_playlist_shuffled(self.id, self.shuffled);
-            self.resort();
+            self.resort(false);
         }
     }
     /// Returns true if the playlist is shuffled, false if it is sorted.
@@ -370,7 +370,7 @@ impl Playlist {
         self.unsorted_songs.sort_by(|a,b| a.read().unwrap().get_id().cmp(&b.read().unwrap().get_id()));
         if self.unsorted_songs != new_songs {
             self.unsorted_songs = new_songs;
-            self.resort();
+            self.resort(false);
         }
         self.library_generation = library_generation;
         Ok(())
@@ -404,16 +404,35 @@ impl Playlist {
     ///
     /// Returns true if the order of the playlist's contents changed as a
     /// result of the sort, false if it remained the same.
-    pub fn resort(&mut self) -> bool {
+    ///
+    /// `ignore_active_song`: If true, disables the logic that would otherwise
+    /// put the currently playing song at the beginning of the shuffle.
+    pub fn resort(&mut self, ignore_active_song: bool) -> bool {
         let mut newly_sorted_songs = self.unsorted_songs.clone();
         if self.shuffled {
             let mut rng = thread_rng();
             if newly_sorted_songs.len() > 1 {
+                // if a song is currently playing, and it's in this playlist,
+                // put it first.
+                let active_song = if ignore_active_song { None }
+                else { playback::get_active_song() };
+                let first_song_n = match active_song {
+                    Some((song_ref, _)) =>
+                        newly_sorted_songs.iter().position(|x| x == &song_ref)
+                            .unwrap_or_else(|| rng.gen_range
+                                            (0 .. newly_sorted_songs.len())),
+                    None => rng.gen_range(0 .. newly_sorted_songs.len()),
+                };
+                if first_song_n != 0 {
+                    newly_sorted_songs.swap(0, first_song_n);
+                }
                 // in place sorting hat algorithm!
-                for n in 0 .. newly_sorted_songs.len() - 1 {
+                for n in 1 .. newly_sorted_songs.len() - 1 {
                     let a = n;
-                    let b = rng.gen_range(n+1 .. newly_sorted_songs.len());
-                    newly_sorted_songs.swap(a, b);
+                    let b = rng.gen_range(n .. newly_sorted_songs.len());
+                    if a != b {
+                        newly_sorted_songs.swap(a, b);
+                    }
                 }
             }
         }

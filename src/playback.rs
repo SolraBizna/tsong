@@ -683,7 +683,7 @@ impl InternalState {
                         drop(playlist);
                         let mut playlist = self.future_playlist.as_ref()
                             .unwrap().write().unwrap();
-                        playlist.resort();
+                        playlist.resort(true);
                         self.future_song = playlist.get_songs().get(0)
                             .cloned();
                         self.future_stream = None;

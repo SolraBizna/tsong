@@ -1152,7 +1152,7 @@ context.drag_finish(res.0, res.1, time);
                     // it's not shuffled, some metadata has changed that
                     // affected the sort?
                     let playlist_changed = if playlist.is_shuffled() { false }
-                    else { playlist.resort() };
+                    else { playlist.resort(false) };
                     if !playlist_changed {
                         // The sort didn't change, but some of the songs at
                         // least did. Update their metadata in-place.
