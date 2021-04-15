@@ -21,10 +21,14 @@ pub use playback::{PlaybackCommand, PlaybackStatus};
 pub use remote::{Remote, RemoteTarget};
 pub use scan::ScanThread;
 
+#[cfg(target_os = "linux")]
+mod alsa;
+
 fn main() {
-    std::thread::spawn(|| {
-        logical::maybe_write_example_import_script()
-    });
+    #[cfg(target_os = "linux")]
+    alsa::suppress_logs();
+    env_logger::init();
+    std::thread::spawn(logical::maybe_write_example_import_script);
     prefs::read().unwrap();
     db::open_database().unwrap();
     ffmpeg::init();

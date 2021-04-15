@@ -1,4 +1,5 @@
 use crate::*;
+use log::error;
 use gtk::{
     prelude::*,
     Align,
@@ -249,16 +250,14 @@ impl Controller {
                 (selected_api_index, n as i32) {
                     Ok(x) => x,
                     Err(x) => {
-                        eprintln!("Error enumerating PortAudio devices! {:?}",
-                                  x);
+                        error!("While enumerating PortAudio devices! {:?}", x);
                         continue
                     },
                 };
             let info = match self.pa.device_info(index) {
                 Ok(x) => x,
                 Err(x) => {
-                    eprintln!("Error enumerating PortAudio devices! {:?}",
-                              x);
+                    error!("While enumerating PortAudio devices! {:?}", x);
                     continue
                 },
             };
@@ -329,7 +328,7 @@ impl Controller {
             Ok(_) => (),
             Err(x) => {
                 // TODO: error dialog
-                eprintln!("Error writing prefs: {:?}", x);
+                error!("While writing prefs: {:?}", x);
                 return
             },
         }
@@ -357,8 +356,8 @@ impl Controller {
             Ok(x) => x,
             Err(_) => {
                 // TODO: Error dialog
-                eprintln!("That path contains invalid Unicode characters. We \
-                           don't support such paths.");
+                error!("The selected path contains invalid Unicode \
+                        characters. We don't support such paths.");
                 return None
             },
         };

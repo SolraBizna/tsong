@@ -7,6 +7,7 @@ use crate::*;
 use lazy_static::lazy_static;
 use arrayref::array_ref;
 use atomic_take::AtomicTake;
+use log::{error,warn};
 
 use std::{
     collections::{BTreeMap, HashMap, hash_map::Entry},
@@ -125,8 +126,8 @@ impl PhysicalFile {
                     return x
                 },
                 Err(x) => {
-                    eprintln!("Error trying to read metadata from {:?}: \
-                               {}", path, x);
+                    error!("When trying to read metadata from {:?}: \
+                            {}", path, x);
                 },
             }
         }
@@ -161,8 +162,8 @@ pub fn add_file_from_db(id: FileID, size: u64, duration: u32,
     let mut files_by_relative_path = FILES_BY_RELATIVE_PATH.write().unwrap();
     let neu_ref = match physical_files.entry(id) {
         Entry::Occupied(_) => {
-            eprintln!("WARNING: Ignoring PhysicalFile with duplicate ID from \
-                       database! (id = {})", id);
+            warn!("Ignoring PhysicalFile with duplicate ID from database! \
+                   (id = {})", id);
             return
         },
         Entry::Vacant(ent) => {
@@ -302,7 +303,7 @@ pub fn open_stream(id: &FileID) -> Option<ffmpeg::AVFormat> {
         match ffmpeg::AVFormat::open_input(&path) {
             Ok(x) => return Some(x),
             Err(x) => {
-                eprintln!("Error opening {:?}: {:?}", path, x);
+                warn!("Unable to open {:?}: {:?}", path, x);
                 continue
             }
         }

@@ -2,6 +2,7 @@
 //! song, file, and playlist information.
 use crate::*;
 
+use log::{debug, info, error};
 use std::{
     cell::RefCell,
     collections::BTreeMap,
@@ -38,20 +39,20 @@ pub fn open_database() -> anyhow::Result<()> {
     match user_version? {
         0 => {
             database.execute_batch(include_str!("sql/schema.sql"))?;
-            // eprintln!("Initialized database from schema.");
+            debug!("Initialized database from schema.");
         },
         1 => {
             // TODO: prompt user for upgrades? try to back up the file?
-            eprintln!("Updating database from schema version 1.");
+            info!("Updating database from schema version 1.");
             database.execute_batch(include_str!("sql/update_1_to_2.sql"))?;
             database.execute_batch(include_str!("sql/update_2_to_3.sql"))?;
         },
         2 => {
-            eprintln!("Updating database from schema version 2.");
+            info!("Updating database from schema version 2.");
             database.execute_batch(include_str!("sql/update_2_to_3.sql"))?;
         },
         3 => {
-            // eprintln!("Database did not require initialization.");
+            debug!("Database did not require initialization.");
         },
         _ => return Err(anyhow!("Unknown database format version. (Was it \
                                  created by a newer version of Tsong?)")),
@@ -381,7 +382,7 @@ pub fn update_song_duration(id: SongID, duration: u32) {
 fn dbtry<X>(x: rusqlite::Result<X>) -> Option<X> {
     match x {
         Err(x) => {
-            eprintln!("Database error: {:?}", x);
+            error!("Database error: {:?}", x);
             None
         },
         Ok(x) => Some(x),

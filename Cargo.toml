@@ -9,13 +9,17 @@ license = "MIT"
 alphanumeric-sort = "1.4"
 anyhow = "1.0"
 arrayref = "0.3.6"
+atomic-take = "1.0"
+env_logger = "0.8"
 ffmpeg-dev = "0.3.8"
+fuse-rust = "0.2"
 gdk = ""
 gio = {version = "", features = ["v2_44"]}
 glib = ""
 gtk = {version = "0.9.0", features = ["v3_16"]}
 lazy_static = "1.4"
 libc = ""
+log = "0.4"
 lsx = {version = "1.1", default-features = false, features = ["sha256"]}
 mlua = {version = "0.4.2", features = ["lua54", "vendored"]}
 mpris-player = {version = "0.6", optional = true}
@@ -24,8 +28,12 @@ rand = "0.8"
 rusqlite = "0.24.2"
 serde = {version = "1.0", features = ["derive"]}
 serde_json = "1.0"
-fuse-rust = "0.2"
-atomic-take = "1.0"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+alsa-sys = "0.3"
+
+[build-dependencies]
+cc = "1.0"
 
 [features]
 default = ["mpris"]

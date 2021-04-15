@@ -4,6 +4,7 @@
 
 use crate::*;
 
+use log::{error,warn,info};
 use anyhow::anyhow;
 use lazy_static::lazy_static;
 use mlua::{Lua, Function, Table};
@@ -190,7 +191,7 @@ pub fn incorporate_physical(file_ref: PhysicalFileRef) {
     let _ = INCORPORATION_LOCK.lock().unwrap();
     // physical file already incorporated? if so, nothing to do
     if let Some(_) = SONGS_BY_FILE_ID.read().unwrap().get(file.get_id()) {
-        eprintln!("Same exact song! {:?}", metadata.get("title"));
+        info!("Same exact song! {:?}", metadata.get("title"));
         return
     }
     // okay, but first let's see if there are any existing songs that look like
@@ -218,7 +219,7 @@ pub fn incorporate_physical(file_ref: PhysicalFileRef) {
     if score >= 100 {
         // match!
         let possibility = &possibilities[0];
-        eprintln!("Existing song! score = {}, title = {:?}", possibility.1, possibility.0.read().unwrap().user_metadata.get("title"));
+        info!("Existing song! score = {}, title = {:?}", possibility.1, possibility.0.read().unwrap().user_metadata.get("title"));
         let mut logical_song = possibility.0.write().unwrap();
         logical_song.physical_files.push(*file.get_id());
         if logical_song.similarity_recs.iter().find(|&x| x == &similarity_rec)
@@ -246,9 +247,8 @@ pub fn incorporate_physical(file_ref: PhysicalFileRef) {
         let mut new_song = new_song_ref.write().unwrap();
         if let Err(x) = new_song.import_metadata(&file, Some(&metadata)) {
             // TODO: error reporting, better
-            eprintln!("Error while importing metadata for song on initial \
-                       scan:\n{}\nFalling back to simple import.\n",
-                      x);
+            error!("While importing metadata for song on initial scan: {}", x);
+            warn!("Falling back to simple import.");
             let mut new_metadata = BTreeMap::new();
             for (k, v) in metadata.iter() {
                 match k.as_str() {
@@ -265,7 +265,7 @@ pub fn incorporate_physical(file_ref: PhysicalFileRef) {
                                    new_song.duration).unwrap(); // TODO: errors
         assert_ne!(song_id, NO_SONG_ID);
         new_song.id = song_id;
-        eprintln!("New song! {:?}", new_song.user_metadata.get("title"));
+        info!("New song! {:?}", new_song.user_metadata.get("title"));
         drop(new_song);
         LOGICAL_SONGS.write().unwrap().push(new_song_ref.clone());
         SONGS_BY_SONG_ID.write().unwrap().insert(song_id,new_song_ref.clone());
@@ -506,9 +506,8 @@ fn load_import_script(lua: &Lua) -> anyhow::Result<Function> {
     let script_func = match script_func {
         Ok(x) => x,
         Err(x) => {
-            eprintln!("Error loading user-provided \
-                       \"import.lua\". Using the built-in \
-                       script.\n{}\n", x);
+            error!("While loading user-provided \"import.lua\": {}", x);
+            warn!("Using the built-in import script.");
             None
         },
     };
@@ -640,7 +639,7 @@ pub fn maybe_write_example_import_script() -> Option<()> {
 pub fn maybe_recreate_recs() {
     let mut songs_with_no_recs = SONGS_WITH_NO_RECS.write().unwrap();
     if songs_with_no_recs.is_empty() { return }
-    eprintln!("Some SimilarityRecs were missing. Performing migration.");
+    warn!("Some SimilarityRecs were missing. Performing migration.");
     let mut songs_by_p_filename = SONGS_BY_P_FILENAME.write().unwrap();
     let mut songs_by_p_title = SONGS_BY_P_TITLE.write().unwrap();
     let mut songs_by_p_artist = SONGS_BY_P_ARTIST.write().unwrap();
@@ -672,8 +671,7 @@ pub fn maybe_recreate_recs() {
             let file_ref = match physical::get_file_by_id(id) {
                 Some(x) => x,
                 None => {
-                    eprintln!("WARNING: database referenced missing file ID \
-                               ({})", id);
+                    warn!("Database referenced missing file ID ({})", id);
                     continue
                 },
             };
@@ -713,6 +711,8 @@ pub fn maybe_recreate_recs() {
             song.similarity_recs = neu_recs;
         }
     }
-    eprintln!("Still orphaned: {}", still_orphaned.len());
+    if still_orphaned.len() > 0 {
+        warn!("Still orphaned after migration: {}", still_orphaned.len());
+    }
     *songs_with_no_recs = still_orphaned;
 }

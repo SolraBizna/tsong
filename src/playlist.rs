@@ -2,6 +2,7 @@
 
 use crate::*;
 
+use log::warn;
 use std::{
     collections::{HashSet, HashMap},
     cmp::Ordering,
@@ -224,8 +225,7 @@ impl Playlist {
             self.manually_added_ids = songs;
             match self.refresh() {
                 Err(x) =>
-                    eprintln!("Warning: Error during manually added song \
-                               refresh: {}", x),
+                    warn!("Error during manually added song refresh: {}", x),
                 _ => (),
             }
             db::update_playlist_manually_added_songs
@@ -543,8 +543,7 @@ pub fn rebuild_children() {
             None => continue,
         };
         if parent_id == child.id {
-            eprintln!("Warning: Playlist {:?} wanted to be its own parent!",
-                      child_ref);
+            warn!("Playlist {:?} wanted to be its own parent!", child_ref);
             child.parent_id = None;
             // TODO: database update?
             continue;
@@ -552,8 +551,8 @@ pub fn rebuild_children() {
         let parent = match playlists_by_id.get(&parent_id) {
             Some(x) => x,
             None => {
-                eprintln!("Warning: Playlist {:?} wanted a parent that \
-                           didn't exist!", child_ref);
+                warn!("Playlist {:?} wanted a parent that didn't exist!",
+                      child_ref);
                 child.parent_id = None;
                 // TODO: database update?
                 continue;

@@ -1,5 +1,6 @@
 //! Safe bindings to the subset of the ffmpeg-dev crate that we use.
 
+use log::{trace, error, debug, info, warn};
 use anyhow::anyhow;
 use ffmpeg_dev::sys as ff;
 use ffmpeg_dev::extra::defs as ffdefs;
@@ -258,18 +259,18 @@ impl AVFormat {
     -> anyhow::Result<i32>
     where H: FnMut(f64, f64, i32, Vec<f32>) {
         let mut got_frame: libc::c_int = 0;
-        //eprintln!("DECODE!");
-        //eprintln!("Packet: {:?} ... {:?}", self.packet.data, self.packet.size);
+        trace!("DECODE!");
+        trace!("Packet: {:?} ... {:?}", self.packet.data, self.packet.size);
         let len = fferr_lt(unsafe {
             ff::avcodec_decode_audio4(self.codec_ctx, self.frame,
                                       &mut got_frame, packet)
         })?;
-        //eprintln!("DECODED!");
+        trace!("DECODED!");
         if got_frame != 0 {
             let frame = unsafe { self.frame.as_ref().unwrap() };
-            let _inner = unsafe { self.inner.as_ref().unwrap() };
+            let inner = unsafe { self.inner.as_ref().unwrap() };
             let stream_ref = self.get_stream_ref(self.stream);
-            //eprintln!("{}, {}", frame.pts, inner.start_time);
+            trace!("{}, {}", frame.pts, inner.start_time);
             let time = frame.pts //(frame.pts - inner.start_time)
                 .saturating_mul(stream_ref.time_base.num as i64) as f64
                 / (stream_ref.time_base.den as f64);
@@ -351,11 +352,11 @@ impl AVFormat {
                         match self.decode_from_packet(&packet, &mut handler) {
                             Ok(_) => (),
                             Err(x) =>
-                                eprintln!("Error decoding audio: {:?}", x),
+                                error!("While decoding audio: {:?}", x),
                         };
                     }
                     else {
-                        eprintln!("av_read_frame error: {}", x);
+                        error!("av_read_frame: {}", x);
                     }
                     return false
                 },
@@ -370,7 +371,7 @@ impl AVFormat {
             unsafe {
                 self.frame = ff::av_frame_alloc();
                 if self.frame.is_null() {
-                    eprintln!("av_frame_alloc failed");
+                    error!("av_frame_alloc failed");
                     return false
                 }
             }
@@ -380,7 +381,7 @@ impl AVFormat {
             let len = match self.decode_from_packet(&packet, &mut handler) {
                 Ok(x) => x,
                 Err(x) => {
-                    eprintln!("Error decoding audio: {:?}", x);
+                    error!("While decoding audio: {:?}", x);
                     return false
                 },
             };
@@ -405,12 +406,12 @@ impl AVFormat {
                                          ff::AVSEEK_FLAG_BACKWARD as i32)} {
             0 => (),
             x => {
-                eprintln!("av_seek_frame returned {}", x);
+                error!("av_seek_frame returned {}", x);
                 return; // well, we tried
             },
         }
         unsafe { ff::avcodec_flush_buffers(self.codec_ctx) };
-        // eprintln!("Seeking to {} = {}!", target, target_timestamp);
+        debug!("Seeking to {} = {}!", target, target_timestamp);
         self.leftovers.clear();
         let mut leftovers = Vec::new();
         // repeat until we start getting data or we run out of data
@@ -550,7 +551,30 @@ impl Expandable for f64 {
 
 /// Call once, at launch time, to do basic initialization of FFMPEG.
 pub fn init() {
-    // Allow ffmpeg to print massive quantities of debug information, but only
-    // if we're a debug build.
-    unsafe { ff::av_log_set_level(if cfg!(debug_assertions) { ff::AV_LOG_WARNING as libc::c_int } else { ff::AV_LOG_PANIC as libc::c_int }); }
+    unsafe {
+        ff::av_log_set_callback(Some(ffmpeg_log_stub));
+    }
+}
+
+extern {
+    fn ffmpeg_log_stub(p: *mut libc::c_void, level: libc::c_int,
+                       format: *const libc::c_char,
+                       args: *mut ff::__va_list_tag);
+}
+
+#[no_mangle]
+pub extern "C" fn ffmpeg_log_backend(_p: libc::uintptr_t, level: libc::c_int,
+                                     text: *const libc::c_char) {
+    let text = unsafe { std::ffi::CStr::from_ptr(text) };
+    let text = text.to_string_lossy().into_owned();
+    let mut text = &text[..];
+    while text.ends_with("\r") || text.ends_with("\n") {
+        text = &text[..text.len()-1];
+    }
+    let level = level as u32;
+    if level >= ff::AV_LOG_DEBUG { trace!("{}", text) }
+    else if level >= ff::AV_LOG_VERBOSE { debug!("{}", text) }
+    else if level >= ff::AV_LOG_INFO { info!("{}", text) }
+    else if level >= ff::AV_LOG_WARNING { warn!("{}", text) }
+    else { error!("{}", text) }
 }

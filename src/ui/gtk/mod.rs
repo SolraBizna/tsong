@@ -1,4 +1,5 @@
 use crate::*;
+use log::{warn, error};
 use fuse_rust::Fuse;
 use gtk::{
     prelude::*,
@@ -885,8 +886,8 @@ context.drag_finish(res.0, res.1, time);
         let playlist_ref = match playlist::get_playlist_by_id(id) {
             Some(playlist) => playlist,
             None => {
-                eprintln!("Warning: Tried to activate playlist ID {} by path \
-                           {}, but it doesn't exist!", id, wo);
+                warn!("Tried to activate playlist ID {} by path {}, but it \
+                       doesn't exist!", id, wo);
                 return
             },
         };
@@ -918,7 +919,7 @@ context.drag_finish(res.0, res.1, time);
             match prefs::write() {
                 Ok(_) => (),
                 Err(x) => {
-                    eprintln!("Error writing preferences: {:?}", x);
+                    error!("While writing preferences: {:?}", x);
                 },
             }
         }
@@ -1082,7 +1083,7 @@ context.drag_finish(res.0, res.1, time);
         let scan_in_progess = match self.scan_thread.get_result_nonblocking() {
             Err(x) => {
                 // TODO: display this error
-                eprintln!("Warning: Scan thread crashed! {:?}", x);
+                error!("Scan thread crashed! {:?}", x);
                 false
             },
             Ok((x, None)) => !x,
@@ -1095,7 +1096,7 @@ context.drag_finish(res.0, res.1, time);
             },
             Ok((false, Some(Err(x)))) => {
                 // TODO: display this error
-                eprintln!("Warning: Error during scan! {:?}", x);
+                error!("Error during scan! {:?}", x);
                 true
             },
         };
@@ -1167,10 +1168,8 @@ context.drag_finish(res.0, res.1, time);
                             match self.update_playlist_view
                                 (playlist, changed_songs_in_playlist) {
                                     Ok(_) => return,
-                                    Err(x) => eprintln!("Warning: \
-                                                         Error while doing in-\
-                                                         place metadata \
-                                                         update: {}", x),
+                                    Err(x) => error!("While doing in-place \
+                                                      metadata update: {}", x),
                                 }
                         }
                     }
@@ -1275,8 +1274,7 @@ context.drag_finish(res.0, res.1, time);
         let playlist = match playlist::create_new_playlist() {
             Ok(x) => x,
             Err(x) => {
-                // TODO: display error better
-                eprintln!("Unable to create playlist: {:?}", x);
+                error!("Unable to create playlist: {:?}", x);
                 return None
             }
         };
@@ -1410,7 +1408,7 @@ context.drag_finish(res.0, res.1, time);
     fn rescan(&mut self) {
         match self.scan_thread.rescan(prefs::get_music_paths()) {
             Ok(_) => (),
-            Err(x) => eprintln!("Warning: couldn't start music scan! {:?}", x),
+            Err(x) => warn!("Couldn't start music scan! {:?}", x),
         }
         self.force_periodic();
     }

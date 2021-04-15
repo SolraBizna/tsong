@@ -23,6 +23,7 @@ use std::os::unix::ffi::OsStrExt;
 #[cfg(target_family = "unix")]
 use std::ffi::OsStr;
 
+use log::{warn, error};
 use std::{
     env::var_os,
     fs,
@@ -152,7 +153,7 @@ pub fn for_each_config_file<F: FnMut(&Path) -> anyhow::Result<()>>(name: &str,
             }
         };
         if let Err(x) = result {
-            eprintln!("WARNING: Error reading configuration file:\n{:?}\n", x);
+            error!("While reading configuration file:\n{:?}\n", x);
         }
     }
     Ok(())
@@ -196,8 +197,8 @@ impl Drop for Update {
         if self.finished { return }
         if let Err(x) = fs::remove_file(&self.neu_path) {
             if cfg!(debug_assertions) {
-                eprintln!("WARNING: Couldn't delete a config file whose \
-                           update process aborted! {:?}", x);
+                warn!("Couldn't delete a config file whose update process \
+                       aborted! {:?}", x);
             }
         }
     }

@@ -1,4 +1,5 @@
 use crate::*;
+use log::{warn, error};
 use gtk::{
     prelude::*,
     Align,
@@ -999,9 +1000,9 @@ impl Controller {
                         Some(file) => file,
                         None => {
                             drop(song);
-                            eprintln!("Song {:?} couldn't be reimported \
-                                       because it has no physical files...?",
-                                      song_ref);
+                            warn!("Song {:?} couldn't be reimported \
+                                   because it has no physical files...?",
+                                  song_ref);
                             continue
                         },
                     };
@@ -1013,8 +1014,8 @@ impl Controller {
                     },
                     Err(x) => {
                         drop(song);
-                        eprintln!("Error importing metadata for song {:?}:\n\
-                                   {}", song_ref, x);
+                        error!("While importing metadata for song {:?}:\n\
+                                {}", song_ref, x);
                         continue
                     },
                 }
@@ -1033,9 +1034,9 @@ impl Controller {
                         Some(file) => file,
                         None => {
                             drop(song);
-                            eprintln!("Song {:?} couldn't be reimported \
-                                       because it has no physical files...?",
-                                      song_ref);
+                            warn!("Song {:?} couldn't be reimported \
+                                   because it has no physical files...?",
+                                  song_ref);
                             continue
                         },
                     };
@@ -1044,8 +1045,8 @@ impl Controller {
                     Ok(x) => x,
                     Err(x) => {
                         drop(song);
-                        eprintln!("Error importing metadata for song {:?}:\n\
-                                   {}", song_ref, x);
+                        error!("Error importing metadata for song {:?}:\n\
+                                {}", song_ref, x);
                         continue
                     },
                 };

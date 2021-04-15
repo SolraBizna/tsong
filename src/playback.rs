@@ -4,6 +4,7 @@
 
 use crate::*;
 
+use log::{warn, error};
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex, atomic::Ordering},
@@ -193,7 +194,8 @@ pub fn send_command(wat: PlaybackCommand) {
     }
     match playback_control_tx.as_ref().unwrap().send(PlaybackThreadMessage::Command(wat)) {
         Ok(_) => (),
-        Err(_) => eprintln!("WARNING: Playback thread is dead"),
+        Err(_) => error!("Playback thread has died. Playback is broken now. \
+                          (issue #17)"),
     }
 }
 
@@ -212,7 +214,8 @@ fn playback_callback(args: OutputCallbackArgs<f32>) -> StreamCallbackResult {
         let was_broken = BROKEN_STREAM_TIME.swap(true, Ordering::Release);
         let true_now = BROKEN_EPOCH.elapsed().as_secs_f64();
         if !was_broken {
-            eprintln!("Stream time is broken on this driver!");
+            warn!("Stream time is broken on this driver! Using the wall-clock \
+                   hack!");
             true_now // don't add latency, we're hopefully priming buffers
         }
         else {
@@ -737,8 +740,8 @@ impl InternalState {
             match self.check_stream() {
                 Ok(_) => (),
                 Err(x) => {
-                    eprintln!("Error while trying to open {:?}\n{:?}",
-                              self.future_song.as_ref().unwrap(), x);
+                    error!("While trying to open {:?}\n{:?}",
+                           self.future_song.as_ref().unwrap(), x);
                     self.future_stream = None;
                     self.next_song();
                     return 0;
