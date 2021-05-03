@@ -261,6 +261,7 @@ impl Controller {
                     continue
                 },
             };
+            if info.max_output_channels < 1 { continue }
             let new_row = self.audiodev_model.append();
             if Some(n) == chosen_dev {
                 selected_iter = Some(new_row.clone());
