@@ -42,6 +42,7 @@ const PLAYLIST_CODE_TOOLTIP: &str =
      \n\
      album:contains \"Moonlight\" or artist:starts_with \"The Answer\"\n\
      \n\
+     See the readme for more examples and a more detailed description. \
      Leave empty to include only manually added songs.";
 
 pub struct Controller {
@@ -166,6 +167,11 @@ impl Controller {
             .vexpand(true)
             .build();
         let columns_view = TreeViewBuilder::new()
+            .tooltip_text("List of metadata tags that will appear in the \
+                           playlist view. You probably at least want \
+                           \"title\" or \"track#\" to be present here.\n\n\
+                           Click and drag to reorder, or use the buttons \
+                           below to add and remove elements.")
             .headers_visible(false).reorderable(true).build();
         columns_view.get_selection().set_mode(SelectionMode::Multiple);
         let column_tag_column = TreeViewColumn::new();
@@ -180,11 +186,17 @@ impl Controller {
         let column_button_box = ButtonBoxBuilder::new()
             .layout_style(ButtonBoxStyle::Expand)
             .build();
-        let delete_column_button = ButtonBuilder::new().build();
+        let delete_column_button = ButtonBuilder::new()
+            .tooltip_text("Delete the selected metadata tag from the list of \
+                           tags to display in the playlist view.")
+            .build();
         delete_column_button.set_sensitive(false);
         column_button_box.add(&delete_column_button);
         super::set_icon(&delete_column_button, "tsong-remove");
-        let new_column_button = ButtonBuilder::new().build();
+        let new_column_button = ButtonBuilder::new()
+            .tooltip_text("Add a new metadata tag to the list of tags to \
+                           display in the playlist view.")
+            .build();
         column_button_box.add(&new_column_button);
         columns_box.add(&column_button_box);
         super::set_icon(&new_column_button, "tsong-add");
@@ -237,7 +249,10 @@ impl Controller {
         let metadata_button_box = ButtonBoxBuilder::new()
             .layout_style(ButtonBoxStyle::Expand)
             .build();
-        let delete_meta_button = ButtonBuilder::new().build();
+        let delete_meta_button = ButtonBuilder::new()
+            .tooltip_text("Delete the selected metadata tag from the selected \
+                           songs' metadata.")
+            .build();
         delete_meta_button.set_sensitive(false);
         metadata_button_box.add(&delete_meta_button);
         super::set_icon(&delete_meta_button, "tsong-remove");
@@ -249,14 +264,25 @@ impl Controller {
         metadata_button_box.add(&meta_script_button);
          */
         let reimport_all_meta_button = ButtonBuilder::new()
+            .tooltip_text("Re-import all metadata for the selected songs, \
+                           replacing any Tsong-specific metadata they may \
+                           have with the original, on-disk metadata from the \
+                           original files.")
             .label("_Re-import All").use_underline(true).build();
         reimport_all_meta_button.set_sensitive(false);
         metadata_button_box.add(&reimport_all_meta_button);
         let reimport_selected_meta_button = ButtonBuilder::new()
+            .tooltip_text("Re-import each selected metadata tag's original, \
+                           on-disk value (if any) to the selected songs. Any \
+                           selected metadata tags that aren't found in the \
+                           original metadata will be erased.")
             .label("Re-import _Selected").use_underline(true).build();
         reimport_selected_meta_button.set_sensitive(false);
         metadata_button_box.add(&reimport_selected_meta_button);
-        let new_meta_button = ButtonBuilder::new().build();
+        let new_meta_button = ButtonBuilder::new()
+            .tooltip_text("Add a new metadata tag to the selected songs' \
+                           metadata.")
+            .build();
         new_meta_button.set_sensitive(false);
         metadata_button_box.add(&new_meta_button);
         meta_box.add(&metadata_button_box);
@@ -271,15 +297,19 @@ impl Controller {
         let button_box = ButtonBoxBuilder::new()
             .spacing(6).build();
         let cancel_button = ButtonBuilder::new()
+            .tooltip_text("Close this window without saving your changes.")
             .label("_Cancel").use_underline(true).build();
         buttons_box.pack_start(&cancel_button, false, true, 0);
         let revert_button = ButtonBuilder::new()
+            .tooltip_text("Revert your changes.")
             .label("Rever_t").use_underline(true).build();
         buttons_box.pack_start(&revert_button, false, true, 0);
         let apply_button = ButtonBuilder::new()
+            .tooltip_text("Apply your changes.")
             .label("_Apply").use_underline(true).build();
         button_box.pack_end(&apply_button, false, true, 0);
         let ok_button = ButtonBuilder::new()
+            .tooltip_text("Close this window and apply your changes.")
             .label("Save & Cl_ose").use_underline(true).build();
         ok_button.get_style_context().add_class("suggested-action");
         button_box.pack_end(&ok_button, false, true, 0);

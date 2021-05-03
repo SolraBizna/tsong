@@ -62,9 +62,10 @@ impl Controller {
             .build();
         window.add(&big_box);
         big_box.add(&LabelBuilder::new()
-                     .label("Audio API:").halign(Align::Start).build());
+                    .label("Audio API:").halign(Align::Start).build());
         let renderer = CellRendererText::new();
         let hostapi_view = ComboBoxBuilder::new()
+            .tooltip_text("Which audio API to use. (Advanced)")
             .name("hostapi_view").build();
         hostapi_view.pack_start(&renderer, true);
         hostapi_view.add_attribute(&renderer, "text", 1);
@@ -72,6 +73,7 @@ impl Controller {
         big_box.add(&LabelBuilder::new()
                     .label("Audio Device:").halign(Align::Start).build());
         let audiodev_view = ComboBoxBuilder::new()
+            .tooltip_text("Which output device to use.")
             .name("audiodev_view").build();
         audiodev_view.pack_start(&renderer, true);
         audiodev_view.add_attribute(&renderer, "text", 1);
@@ -86,6 +88,9 @@ impl Controller {
             .vexpand(true)
             .build();
         let locations_view = TreeViewBuilder::new()
+            .tooltip_text("List of locations on your filesystem that this \
+                           copy of Tsong will scan for songs.\n\n\
+                           Use the buttons below to add and remove elements.")
             .headers_visible(false).reorderable(true).build();
         let location_column = TreeViewColumn::new();
         let location_cell = CellRendererText::new();
@@ -97,11 +102,17 @@ impl Controller {
         let location_button_box = ButtonBoxBuilder::new()
             .layout_style(ButtonBoxStyle::Expand)
             .build();
-        let delete_location_button = ButtonBuilder::new().build();
+        let delete_location_button = ButtonBuilder::new()
+            .tooltip_text("Delete the selected location from the list of \
+                           locations to scan for songs.")
+            .build();
         delete_location_button.set_sensitive(false);
         location_button_box.add(&delete_location_button);
         super::set_icon(&delete_location_button, "tsong-remove");
-        let new_location_button = ButtonBuilder::new().build();
+        let new_location_button = ButtonBuilder::new()
+            .tooltip_text("Add a new location to the list of locations to \
+                           scan for songs.")
+            .build();
         location_button_box.add(&new_location_button);
         big_box.add(&location_button_box);
         super::set_icon(&new_location_button, "tsong-add");
@@ -114,12 +125,15 @@ impl Controller {
         let button_box = ButtonBoxBuilder::new()
             .spacing(6).build();
         let cancel_button = ButtonBuilder::new()
+            .tooltip_text("Close this window without saving your changes.")
             .label("_Cancel").use_underline(true).build();
         buttons_box.pack_start(&cancel_button, false, true, 0);
         let apply_button = ButtonBuilder::new()
+            .tooltip_text("Apply your changes.")
             .label("_Apply").use_underline(true).build();
         button_box.pack_end(&apply_button, false, true, 0);
         let ok_button = ButtonBuilder::new()
+            .tooltip_text("Close this window and apply your changes.")
             .label("Save & Cl_ose").use_underline(true).build();
         ok_button.get_style_context().add_class("suggested-action");
         button_box.pack_end(&ok_button, false, true, 0);

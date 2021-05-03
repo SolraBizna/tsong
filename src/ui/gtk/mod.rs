@@ -171,18 +171,23 @@ impl Controller {
         // So, the playback controls...
         // Button to bring up the settings window:
         let settings_button = ToggleButtonBuilder::new()
+            .tooltip_text("Open a window where you can change settings such \
+                           as audio device and song locations.")
             .name("settings").build();
         control_button_add(&control_box, &settings_button, &["popup"]);
         // Button to go back to the previous song in the playlist:
         let prev_button = ButtonBuilder::new()
+            .tooltip_text("Jump to the previous song in the playlist.")
             .name("prev").build();
         control_button_add(&control_box, &prev_button, &["circular"]);
         // Explicit play/pause button
         let play_button = ButtonBuilder::new()
+            .tooltip_text("Start or pause playback.")
             .name("playpause").build();
         control_button_add(&control_box, &play_button, &["circular"]);
         // Button to go to the next song in the playlist:
         let next_button = ButtonBuilder::new()
+            .tooltip_text("Jump to the next song in the playlist.")
             .name("next").build();
         control_button_add(&control_box, &next_button, &["circular"]);
         // Osd widget!
@@ -213,6 +218,8 @@ impl Controller {
             .restrict_to_fill_level(false)
             .adjustment(&Adjustment::new(prefs::get_volume() as f64,
                                          0.0, 200.0, 1.0, 10.0, 10.0))
+            .tooltip_text("Adjust playback volume. Note that volumes above \
+                           100% may result in distortion.")
             .build();
         let volume_label = LabelBuilder::new()
             .halign(Align::Center).valign(Align::Center).build();
@@ -228,6 +235,8 @@ impl Controller {
         });
         // Button to "roll up" the playlist box:
         let rollup_button = ButtonBuilder::new()
+            .tooltip_text("Toggle between the full interface and the compact \
+                           interface.")
             .name("rollup").build();
         control_button_add(&control_box, &rollup_button, &["toggle"]);
         // That's the end of the playback controls.
@@ -253,9 +262,14 @@ impl Controller {
         let playlist_button_box = ButtonBoxBuilder::new()
             .layout_style(ButtonBoxStyle::Expand)
             .build();
-        let delete_playlist_button = ButtonBuilder::new().build();
+        let delete_playlist_button = ButtonBuilder::new()
+            .tooltip_markup("Delete the selected playlist(s) forever. (This \
+                             will never delete a <i>song</i>.)")
+            .build();
         playlist_button_box.add(&delete_playlist_button);
-        let new_playlist_button = ButtonBuilder::new().build();
+        let new_playlist_button = ButtonBuilder::new()
+            .tooltip_text("Create a new, empty playlist.")
+            .build();
         playlist_button_box.add(&new_playlist_button);
         rollup_grid.attach(&playlist_button_box, 0, 1, 1, 1);
         // and the play...list
@@ -298,14 +312,20 @@ impl Controller {
         playlist_control_box.pack_end(&BoxBuilder::new().build(), false, false, 0);
         // Button to change shuffle mode:
         let shuffle_button = ToggleButtonBuilder::new()
+            .tooltip_text("Toggle shuffle mode. When active, the playlist \
+                           will be played back in a random order.")
             .name("shuffle").build();
         playlist_control_box.pack_start(&shuffle_button, false, false, 0);
         // Button to change loop mode:
         let playmode_button = ToggleButtonBuilder::new()
+            .tooltip_text("Toggle looping mode. Can either loop a single \
+                           song, loop an entire playlist, or never loop.")
             .name("playmode").build();
         playlist_control_box.pack_start(&playmode_button, false, false, 0);
         // Button to edit playlist settings:
         let playlist_edit_button = ToggleButtonBuilder::new()
+            .tooltip_text("Open a window where you can edit properties of \
+                           this playlist, or of the selected song(s).")
             .name("edit_playlist").label("Edit").build();
         playlist_control_box.pack_end(&playlist_edit_button, false, false, 0);
         below_playlist_box.pack_start(&playlist_control_box, false, false, 0);
@@ -1147,7 +1167,8 @@ context.drag_finish(res.0, res.1, time);
                 }
                 // TODO: i18n, plurality
                 self.errors_button.set_tooltip_text
-                    (Some(&format!("Errors: {}", total_error_count)));
+                    (Some(&format!("Errors: {}\nClick for more information.",
+                                   total_error_count)));
             }
             self.errors_controller.as_ref().unwrap().try_borrow_mut().ok()?
                 .update_if_visible(new_generation, errors);
