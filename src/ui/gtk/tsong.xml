@@ -2,6 +2,7 @@
 <gresources>
   <gresource prefix="/name/bizna/tsong">
     <file compressed="true">icons/tsong-add-symbolic.svg</file>
+    <file compressed="true">icons/tsong-errors-symbolic.svg</file>
     <file compressed="true">icons/tsong-loop-one-symbolic.svg</file>
     <file compressed="true">icons/tsong-loop-symbolic.svg</file>
     <file compressed="true">icons/tsong-next-symbolic.svg</file>

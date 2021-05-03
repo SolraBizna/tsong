@@ -25,6 +25,7 @@ use gtk::{
     Orientation,
     Overlay, OverlayBuilder,
     PolicyType,
+    ReliefStyle,
     ResponseType,
     Scale, ScaleBuilder,
     ScrolledWindowBuilder,
@@ -68,6 +69,7 @@ use anyhow::anyhow;
 
 mod settings;
 mod playlist_edit;
+mod errors_window;
 mod scrp;
 use scrp::*;
 
@@ -106,6 +108,7 @@ pub struct Controller {
     playlists_view: TreeView,
     playmode_button: ToggleButton,
     playlist_edit_button: ToggleButton,
+    errors_button: ToggleButton,
     prev_button: Button,
     rollup_button: Button,
     rollup_grid: Grid,
@@ -114,6 +117,7 @@ pub struct Controller {
     volume_scale: Scale,
     window: ApplicationWindow,
     playlist_generation: GenerationValue,
+    errors_generation: GenerationValue,
     scan_spinner: Spinner,
     remote: Option<Remote>,
     remote_time: f64,
@@ -123,6 +127,7 @@ pub struct Controller {
     rolled_down_height: i32,
     settings_controller: Option<Rc<RefCell<settings::Controller>>>,
     playlist_edit_controller: Option<Rc<RefCell<playlist_edit::Controller>>>,
+    errors_controller: Option<Rc<RefCell<errors_window::Controller>>>,
     periodic_timer: Option<SourceId>,
     volume_changed: bool,
     me: Option<Weak<RefCell<Controller>>>,
@@ -277,6 +282,12 @@ impl Controller {
         let scan_spinner = SpinnerBuilder::new().name("scan_spinner")
             .halign(Align::Start).valign(Align::Center).build();
         bottom_overlay.add_overlay(&scan_spinner);
+        // and, just because...!
+        let errors_button = ToggleButtonBuilder::new().name("errors")
+            .halign(Align::End).valign(Align::Center).hexpand(false)
+            .relief(ReliefStyle::None).build();
+        bottom_overlay.add_overlay(&errors_button);
+        errors_button.set_sensitive(false);
         below_playlist_box.pack_start(&bottom_overlay, true, true, 0);
         // buttons!
         let playlist_control_box = ButtonBoxBuilder::new()
@@ -422,6 +433,7 @@ impl Controller {
         set_icon(&playmode_button, "tsong-loop");
         set_icon(&new_playlist_button, "tsong-add");
         set_icon(&delete_playlist_button, "tsong-remove");
+        set_icon(&errors_button, "tsong-errors");
         let (song_meta_update_tx, song_meta_update_rx) = mpsc::channel();
         let nu = Rc::new(RefCell::new(Controller {
             rollup_button, settings_button, prev_button, next_button,
@@ -431,10 +443,11 @@ impl Controller {
             scan_spinner, scan_thread, rollup_grid, control_box,
             new_playlist_button, delete_playlist_button,
             playlist_name_column, playlist_name_cell, window,
-            playlist_edit_button,
+            playlist_edit_button, errors_button,
             remote: None, remote_time: -1.0,
             last_active_playlist, last_active_song: None,
             active_playlist: None, playlist_generation: Default::default(),
+            errors_generation: Default::default(), errors_controller: None,
             last_built_playlist: None, me: None, settings_controller: None,
             playlist_edit_controller: None, rolled_down_height: 400,
             periodic_timer: None, volume_changed: false,
@@ -449,6 +462,7 @@ impl Controller {
         this.me = Some(Rc::downgrade(&nu));
         this.settings_controller = Some(settings::Controller::new(Rc::downgrade(&nu)));
         this.playlist_edit_controller = Some(playlist_edit::Controller::new(Rc::downgrade(&nu), song_meta_update_tx));
+        this.errors_controller = Some(errors_window::Controller::new(Rc::downgrade(&nu)));
         this.remote = Some(Remote::new(Rc::downgrade(&nu)));
         this.delete_playlist_button
             .set_sensitive(this.delete_playlist_button_should_be_sensitive());
@@ -562,6 +576,11 @@ context.drag_finish(res.0, res.1, time);
                 .map(|mut x| x.clicked_settings());
         });
         let controller = nu.clone();
+        this.errors_button.connect_clicked(move |_| {
+            let _ = controller.try_borrow_mut()
+                .map(|mut x| x.clicked_errors());
+        });
+        let controller = nu.clone();
         this.playlist_edit_button.connect_clicked(move |_| {
             let _ = controller.try_borrow_mut()
                 .map(|mut x| x.clicked_playlist_edit());
@@ -668,6 +687,8 @@ context.drag_finish(res.0, res.1, time);
         this.force_periodic();
         // okay, show the window and away we go
         this.window.show_all();
+        // and now, this! (because show_all ruins it otherwise)
+        this.errors_button.set_visible(false);
         drop(this);
         nu
     }
@@ -913,6 +934,7 @@ context.drag_finish(res.0, res.1, time);
     fn periodic(&mut self, forced: bool) {
         self.update_view();
         self.update_scan_status();
+        self.update_errors();
         self.maybe_update_playlist();
         if self.volume_changed {
             // TODO: do prefs updates in the background?
@@ -1108,6 +1130,29 @@ context.drag_finish(res.0, res.1, time);
         else {
             self.scan_spinner.stop();
         }
+    }
+    fn update_errors(&mut self) -> Option<()> {
+        if let Some((new_generation, errors)) = errors::if_newer_than(&self.errors_generation) {
+            self.errors_generation = new_generation;
+            if errors.is_empty() {
+                self.errors_button.set_visible(false);
+                self.errors_button.set_sensitive(false);
+            }
+            else {
+                self.errors_button.set_visible(true);
+                self.errors_button.set_sensitive(true);
+                let mut total_error_count = 0;
+                for (_, errors) in errors.iter() {
+                    total_error_count += errors.len();
+                }
+                // TODO: i18n, plurality
+                self.errors_button.set_tooltip_text
+                    (Some(&format!("Errors: {}", total_error_count)));
+            }
+            self.errors_controller.as_ref().unwrap().try_borrow_mut().ok()?
+                .update_if_visible(new_generation, errors);
+        }
+        None
     }
     fn maybe_update_playlist(&mut self) {
         let playlist_ref = match self.active_playlist.as_ref() {
@@ -1390,6 +1435,20 @@ context.drag_finish(res.0, res.1, time);
     }
     fn closed_settings(&mut self) {
         self.settings_button.set_active(false);
+    }
+    fn clicked_errors(&mut self) -> Option<()> {
+        if self.errors_button.get_active() {
+            self.errors_controller.as_ref().unwrap().try_borrow_mut().ok()?
+                .show();
+        }
+        else {
+            self.errors_controller.as_ref().unwrap().try_borrow_mut().ok()?
+                .unshow();
+        }
+        None
+    }
+    fn closed_errors(&mut self) {
+        self.errors_button.set_active(false);
     }
     fn clicked_playlist_edit(&mut self) -> Option<()> {
         if self.playlist_edit_button.get_active() {

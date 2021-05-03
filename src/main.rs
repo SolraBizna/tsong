@@ -11,6 +11,7 @@ pub mod scan;
 pub mod db;
 pub mod ui;
 pub mod remote;
+pub mod errors;
 
 pub use reference::Reference;
 pub use generation::{GenerationTracker, GenerationValue, NOT_GENERATED};

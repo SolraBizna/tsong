@@ -55,6 +55,10 @@ window#editor box#buttons {
 box#settings, box#editor {
     min-width: 500px;
 }
+box#errors {
+    min-width: 80ex;
+    min-height: 8em;
+}
 box#editor scrolledwindow#columns {
     min-height: 200px;
 }
@@ -63,3 +67,4 @@ box#editor scrolledwindow#columns {
 #volume image#quiet { margin-left: 8px; }
 #volume image#loud { margin-right: 8px; }
 #volume #fake { min-width: 160px; }
+#errors textview { padding: 0.5ex 1ex 0.5ex 1ex; }

@@ -426,12 +426,13 @@ fn playback_thread(state: Arc<Mutex<InternalState>>,
                     }
                 }
             }
+            errors::reset_from("Playback Thread");
             match playback_thread_inner_loop(&pa, &state,
                                              &playback_control_rx) {
                 Ok(_) => (),
                 Err(x) => {
-                    // TODO: display this to the user
                     error!("in playback thread: {}", x);
+                    errors::from("Playback Thread", x.to_string());
                     error!("(we'll try again in a few moments)");
                     std::thread::sleep(Duration::from_secs(3));
                 },
