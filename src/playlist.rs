@@ -193,6 +193,7 @@ impl Playlist {
     /// Checks the validity of the given rule code. Returns:
     /// - `Err("...")` → the rule code is invalid and we made no change
     /// - `Ok(...)` → the rule code is valid and we made the change
+    #[allow(dead_code)]
     pub fn set_rule_code(&mut self, neu: String) -> Result<(), String> {
         self.refresh_with_code(Some(&neu))?;
         self.rule_code = neu;
@@ -242,6 +243,7 @@ impl Playlist {
             }
         }
     }
+    #[allow(dead_code)]
     pub fn get_sort_order(&self) -> &[(String,bool)] { &self.sort_order[..] }
     pub fn get_children(&self) -> &[PlaylistRef] { &self.children[..] }
     pub fn get_parent(&self) -> Option<PlaylistRef> {
@@ -388,6 +390,7 @@ impl Playlist {
     /// Returns the logical song playlist generation value for which this
     /// playlist's contents are up to date. This is NOT a generation value for
     /// this playlist!
+    #[allow(dead_code)]
     pub fn get_library_generation(&self) -> GenerationValue {
         self.library_generation
     }

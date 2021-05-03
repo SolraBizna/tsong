@@ -51,6 +51,7 @@ impl ScanThread {
     ///   necessarily complete)
     /// - `Ok(Some(Err(...)))` → An error was encountered scanning a particular
     ///   file, but the scan is continuing
+    #[allow(dead_code)]
     pub fn get_result_blocking(&mut self)
     -> anyhow::Result<Option<anyhow::Result<()>>> {
         if self.scans_left.load(Ordering::SeqCst) == 0 { Ok(None) }
