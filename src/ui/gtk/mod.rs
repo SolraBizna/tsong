@@ -341,17 +341,31 @@ impl Controller {
                                              TargetFlags::SAME_APP
                                              | TargetFlags::SAME_WIDGET,
                                                 TSONG_PLAYLISTS_TYPE);
-        playlist_view.drag_source_set(ModifierType::BUTTON1_MASK,
-                                      &[manual_song_type.clone()],
-                                      DragAction::LINK);
         playlist_view.connect_drag_begin(|_widget, context| {
             trace!("playlist_view begins drag");
             context.drag_set_icon_name("tsong-dragged-playlist", 0, 0);
+        });
+        playlist_view.connect_drag_end(|_widget, _context| {
+            trace!("playlist_view ends drag");
+        });
+        playlist_view.connect_drag_failed(|_widget, _context, why| {
+            trace!("playlist_view ends drag ({:?})", why);
+            Inhibit(false)
         });
         playlists_view.connect_drag_begin(|_widget, context| {
             trace!("playlists_view begins drag");
             context.drag_set_icon_name("tsong-dragged-song", 0, 0);
         });
+        playlists_view.connect_drag_end(|_widget, _context| {
+            trace!("playlists_view ends drag");
+        });
+        playlists_view.connect_drag_failed(|_widget, _context, why| {
+            trace!("playlists_view ends drag ({:?})", why);
+            Inhibit(false)
+        });
+        playlist_view.drag_source_set(ModifierType::BUTTON1_MASK,
+                                      &[manual_song_type.clone()],
+                                      DragAction::LINK);
         playlists_view.drag_source_set(ModifierType::BUTTON1_MASK,
                                       &[playlist_type.clone()],
                                        DragAction::MOVE);
