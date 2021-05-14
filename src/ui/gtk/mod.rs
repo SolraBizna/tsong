@@ -344,6 +344,12 @@ impl Controller {
         playlist_view.drag_source_set(ModifierType::BUTTON1_MASK,
                                       &[manual_song_type.clone()],
                                       DragAction::LINK);
+        playlist_view.connect_drag_begin(|_widget, context| {
+            context.drag_set_icon_name("tsong-dragged-playlist", 0, 0);
+        });
+        playlists_view.connect_drag_begin(|_widget, context| {
+            context.drag_set_icon_name("tsong-dragged-song", 0, 0);
+        });
         playlists_view.drag_source_set(ModifierType::BUTTON1_MASK,
                                       &[playlist_type.clone()],
                                        DragAction::MOVE);
