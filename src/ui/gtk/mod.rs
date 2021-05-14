@@ -1,5 +1,5 @@
 use crate::*;
-use log::{warn, error};
+use log::{warn, error, trace};
 use fuse_rust::Fuse;
 use gtk::{
     prelude::*,
@@ -345,9 +345,11 @@ impl Controller {
                                       &[manual_song_type.clone()],
                                       DragAction::LINK);
         playlist_view.connect_drag_begin(|_widget, context| {
+            trace!("playlist_view begins drag");
             context.drag_set_icon_name("tsong-dragged-playlist", 0, 0);
         });
         playlists_view.connect_drag_begin(|_widget, context| {
+            trace!("playlists_view begins drag");
             context.drag_set_icon_name("tsong-dragged-song", 0, 0);
         });
         playlists_view.drag_source_set(ModifierType::BUTTON1_MASK,
@@ -361,6 +363,7 @@ impl Controller {
         let tsong_playlists_mimetype_atom = Atom::intern(TSONG_PLAYLISTS_MIMETYPE);
         playlist_view.connect_drag_data_get(
             move |playlist_view, _context, data, _info, _timestamp| {
+                trace!("playlist_view drag data get!");
                 let selection = playlist_view.get_selection();
                 let (wo_list, model) = selection.get_selected_rows();
                 let mut selected_songs = Vec::new();
@@ -377,6 +380,7 @@ impl Controller {
             });
         playlists_view.connect_drag_data_get(
             move |playlists_view, _context, data, _info, _timestamp| {
+                trace!("playlists_view drag data get!");
                 let selection = playlists_view.get_selection();
                 let (wo_list, model) = selection.get_selected_rows();
                 let mut selected_playlists = Vec::new();
@@ -396,6 +400,7 @@ impl Controller {
             });
         playlists_view.connect_drag_motion(
             move|playlists_view, context, x, y, time| {
+                trace!("playlists_view drag motion {}, {}!", x, y);
                 match check_drag_onto_playlist
                     (playlists_view, context, x, y, time,
                      &tsong_songs_mimetype_atom,
@@ -415,11 +420,13 @@ impl Controller {
             });
         playlists_view.connect_drag_drop(
             move|playlists_view, context, x, y, time| {
+                trace!("playlists_view drag drop {}, {}!", x, y);
                 match check_drag_onto_playlist
                     (playlists_view, context, x, y, time,
                      &tsong_songs_mimetype_atom,
                      &tsong_playlists_mimetype_atom) {
                         Some((wo, pos, action, target)) => {
+                            trace!("  Drag OK!");
                             context.drag_status(action, time);
                             playlists_view.set_drag_dest_row(Some(&wo), pos);
                             playlists_view.drag_get_data(context, target,
@@ -427,6 +434,7 @@ impl Controller {
                             Inhibit(true)
                         },
                         None => {
+                            trace!("  Drag not OK!");
                             let pos = TreeViewDropPosition::Before;
                             context.drag_status(DragAction::empty(), time);
                             playlists_view.set_drag_dest_row(None, pos);
