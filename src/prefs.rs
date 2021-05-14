@@ -20,13 +20,13 @@ use portaudio::{
 
 #[derive(Debug,Deserialize)]
 pub struct Preferences {
-    #[serde(default)]
+    #[serde(default = "get_standard_volume")]
     volume: i32,
     #[serde(default)]
     music_paths: Vec<String>,
-    #[serde(default)]
+    #[serde(default = "get_standard_desired_latency")]
     desired_latency: f64,
-    #[serde(default)]
+    #[serde(default = "get_standard_decode_ahead")]
     decode_ahead: f64,
     // these two must both match in order for the choice to be considered valid
     #[serde(default)]
@@ -49,23 +49,33 @@ pub const STANDARD_VOLUME: i32 = 100;
 /// The highest permitted volume level.
 pub const MAX_VOLUME: i32 = 200;
 
+fn get_standard_volume() -> i32 { STANDARD_VOLUME }
+
 /// The lowest permitted target latency.
 pub const MIN_DESIRED_LATENCY: f64 = 0.1;
+/// The standard target latency.
+pub const STANDARD_DESIRED_LATENCY: f64 = 1.0;
 /// The highest permitted target latency.
 pub const MAX_DESIRED_LATENCY: f64 = 3.0;
 
+fn get_standard_desired_latency() -> f64 { STANDARD_DESIRED_LATENCY }
+
 /// The lowest permitted decode-ahead.
 pub const MIN_DECODE_AHEAD: f64 = 0.5;
+/// The standard decode-ahead.
+pub const STANDARD_DECODE_AHEAD: f64 = 3.0;
 /// The highest permitted decode-ahead.
 pub const MAX_DECODE_AHEAD: f64 = 35.0;
+
+fn get_standard_decode_ahead() -> f64 { STANDARD_DECODE_AHEAD }
 
 impl Default for Preferences {
     fn default() -> Self {
         Preferences {
             volume: STANDARD_VOLUME,
             music_paths: Vec::new(),
-            desired_latency: 1.0,
-            decode_ahead: 3.0,
+            desired_latency: STANDARD_DESIRED_LATENCY,
+            decode_ahead: STANDARD_DECODE_AHEAD,
             audio_api_index: None, audio_api_name: None,
             audio_dev_index: None, audio_dev_name: None,
         }
