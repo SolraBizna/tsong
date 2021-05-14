@@ -21,6 +21,7 @@ use playlist::{Playlist, PlaylistRef, PlaylistID, Playmode};
 use playback::{PlaybackCommand, PlaybackStatus};
 use remote::{Remote, RemoteTarget};
 use scan::ScanThread;
+use log::error;
 
 #[cfg(target_os = "linux")]
 mod alsa;
@@ -30,7 +31,10 @@ fn main() {
     alsa::suppress_logs();
     env_logger::init();
     std::thread::spawn(logical::maybe_write_example_import_script);
-    prefs::read().unwrap();
+    match prefs::read() {
+        Err(x) => error!("Error reading preferences: {}", x),
+        Ok(_) => (),
+    }
     db::open_database().unwrap();
     ffmpeg::init();
     ui::go();

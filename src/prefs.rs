@@ -2,14 +2,13 @@
 //! things that are stored in `Tsong.conf` and changed in the "Preferences"
 //! window.
 
-use anyhow::anyhow;
-use mlua::{Lua, HookTriggers};
 use lazy_static::lazy_static;
 use crate::config;
+use toml::Value;
+use serde::Deserialize;
 
 use std::{
     convert::TryInto,
-    fs::File,
     io::{Read, Write},
     sync::RwLock,
 };
@@ -19,7 +18,7 @@ use portaudio::{
     PortAudio,
 };
 
-#[derive(Debug)]
+#[derive(Debug,Deserialize)]
 pub struct Preferences {
     volume: i32,
     music_paths: Vec<String>,
@@ -31,17 +30,19 @@ pub struct Preferences {
     audio_dev_name: Option<String>,
 }
 
-const PREFS_FILE_NAME: &str = "Tsong.conf";
+const PREFS_FILE_NAME: &str = "Tsong.toml";
 
 /// The lowest permitted volume level.
 pub const MIN_VOLUME: i32 = 0;
+/// The standard volume level.
+pub const STANDARD_VOLUME: i32 = 100;
 /// The highest permitted volume level.
 pub const MAX_VOLUME: i32 = 200;
 
 impl Default for Preferences {
     fn default() -> Self {
         Preferences {
-            volume: 100,
+            volume: STANDARD_VOLUME,
             music_paths: Vec::new(),
             audio_api_index: None, audio_api_name: None,
             audio_dev_index: None, audio_dev_name: None,
@@ -57,60 +58,18 @@ lazy_static! {
 /// Call at least once, at startup. This will read in saved values for the
 /// preferences.
 pub fn read() -> anyhow::Result<()> {
-    // TODO: request the ability to load no libraries
-    // TODO: report the error with Lua::new_with(StdLib::TABLE)
-    let lua = Lua::new();
-    lua.set_memory_limit(1000000)
-        .expect("Couldn't limit configuration file memory usage");
-    lua.set_hook(HookTriggers {
-        on_calls: false, on_returns: false, every_line: false,
-        every_nth_instruction: Some(1000000),
-    }, |_lua, _debug| {
-        Err(mlua::Error::RuntimeError("Configuration file(s) took too long to \
-                                       execute".to_owned()))
-    }).expect("Couldn't limit configuration file execution time");
-    config::for_each_config_file(PREFS_FILE_NAME, |path| ->anyhow::Result<()> {
-        let mut f = File::open(path)?;
-        let mut a = Vec::new();
-        f.read_to_end(&mut a)?;
-        drop(f);
-        match lua.load(&a[..]).exec() {
-            Ok(_) => Ok(()),
-            Err(x) => Err(anyhow!("Error in configuration file: {}", x)),
-        }
-    })?;
+    let mut f = match config::open_best_for_read(PREFS_FILE_NAME)? {
+        Some(f) => f,
+        None => {
+            *PREFERENCES.write().unwrap() = Default::default();
+            return Ok(())
+        },
+    };
+    let mut buf = String::new();
+    f.read_to_string(&mut buf)?;
+    drop(f);
     let mut prefs = PREFERENCES.write().unwrap();
-    let globals = lua.globals();
-    if let Ok(Some(volume)) = globals.get::<&str, Option<i32>>("volume") {
-        prefs.volume = volume.max(MIN_VOLUME).min(MAX_VOLUME)
-    }
-    if let Ok(Some(music_paths)) = globals
-    .get::<&str, Option<Vec<String>>>("music_paths") {
-        prefs.music_paths = music_paths
-    }
-    if let Ok(audio_api_index) = globals.get("audio_api_index") {
-        prefs.audio_api_index = audio_api_index;
-    }
-    if let Ok(audio_api_name) = globals.get("audio_api_name") {
-        prefs.audio_api_name = audio_api_name;
-    }
-    if let Ok(audio_dev_index) = globals.get("audio_dev_index") {
-        prefs.audio_dev_index = audio_dev_index;
-    }
-    if let Ok(audio_dev_name) = globals.get("audio_dev_name") {
-        prefs.audio_dev_name = audio_dev_name;
-    }
-    Ok(())
-}
-
-fn write_lua_string(f: &mut config::Update, s: &str) -> anyhow::Result<()> {
-    f.write_all(b"\"")?;
-    for b in s.as_bytes().iter() {
-        if *b < 0x20 || *b > 0x7E { write!(f, "\\x{:02X}", b)?; }
-        else if *b == b'\\' { f.write_all(b"\\\\")?; }
-        else { f.write_all(&[*b])?; }
-    }
-    f.write_all(b"\"")?;
+    *prefs = toml::from_str(&buf[..])?;
     Ok(())
 }
 
@@ -118,23 +77,19 @@ fn write_lua_string(f: &mut config::Update, s: &str) -> anyhow::Result<()> {
 pub fn write() -> anyhow::Result<()> {
     let prefs = PREFERENCES.read().unwrap();
     let mut f = config::open_for_write(PREFS_FILE_NAME)?;
-    writeln!(f, "-- -*- lua -*-")?;
     writeln!(f, "volume = {}", prefs.volume)?;
-    writeln!(f, "music_paths = {{")?;
+    writeln!(f, "music_paths = [")?;
     for music_path in prefs.music_paths.iter() {
-        f.write_all(b"  ")?;
-        write_lua_string(&mut f, music_path)?;
-        f.write_all(b",\n")?;
+        writeln!(f, "  {},", Value::String(music_path.to_string()))?;
     }
-    writeln!(f, "}}")?;
+    writeln!(f, "]")?;
     match (prefs.audio_api_index, prefs.audio_api_name.as_ref()) {
         (Some(index), Some(name)) => {
             write!(f, "\n\
-                       -- PortAudio settings\n\
+                       # PortAudio settings\n\
                        audio_api_index = {}\n\
-                       audio_api_name = ", index)?;
-            write_lua_string(&mut f, name)?;
-            f.write_all(b"\n")?;
+                       audio_api_name = {}\n", index,
+                   Value::String(name.to_string()))?;
         },
         _ => (),
     }
@@ -142,12 +97,11 @@ pub fn write() -> anyhow::Result<()> {
         (Some(index), Some(name)) => {
             match (prefs.audio_api_index, prefs.audio_api_name.as_ref()) {
                 (Some(_), Some(_)) => (),
-                _ => f.write_all(b"\n-- PortAudio settings\n")?,
+                _ => f.write_all(b"\n# PortAudio settings\n")?,
             }
             write!(f, "audio_dev_index = {}\n\
-                       audio_dev_name = ", index)?;
-            write_lua_string(&mut f, name)?;
-            f.write_all(b"\n")?;
+                       audio_dev_name = {}\n", index,
+                   Value::String(name.to_string()))?;
         }
         _ => (),
     }

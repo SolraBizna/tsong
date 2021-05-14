@@ -131,6 +131,7 @@ fn get_search_paths() -> Vec<PathBuf> {
 /// Call the given closure once for each configuration file with the given name
 /// found. Starts with the most general file, ends with the most specific one.
 /// Any existing configuration values should be overridden by subsequent calls.
+#[allow(unused)]
 pub fn for_each_config_file<F: FnMut(&Path) -> anyhow::Result<()>>(name: &str,
                                                                    mut f: F)
     -> anyhow::Result<()> {
