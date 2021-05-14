@@ -20,13 +20,23 @@ use portaudio::{
 
 #[derive(Debug,Deserialize)]
 pub struct Preferences {
+    #[serde(default)]
     volume: i32,
+    #[serde(default)]
     music_paths: Vec<String>,
+    #[serde(default)]
+    desired_latency: f64,
+    #[serde(default)]
+    decode_ahead: f64,
     // these two must both match in order for the choice to be considered valid
+    #[serde(default)]
     audio_api_index: Option<u32>,
+    #[serde(default)]
     audio_api_name: Option<String>,
     // same
+    #[serde(default)]
     audio_dev_index: Option<u32>,
+    #[serde(default)]
     audio_dev_name: Option<String>,
 }
 
@@ -39,11 +49,23 @@ pub const STANDARD_VOLUME: i32 = 100;
 /// The highest permitted volume level.
 pub const MAX_VOLUME: i32 = 200;
 
+/// The lowest permitted target latency.
+pub const MIN_DESIRED_LATENCY: f64 = 0.1;
+/// The highest permitted target latency.
+pub const MAX_DESIRED_LATENCY: f64 = 3.0;
+
+/// The lowest permitted decode-ahead.
+pub const MIN_DECODE_AHEAD: f64 = 0.5;
+/// The highest permitted decode-ahead.
+pub const MAX_DECODE_AHEAD: f64 = 35.0;
+
 impl Default for Preferences {
     fn default() -> Self {
         Preferences {
             volume: STANDARD_VOLUME,
             music_paths: Vec::new(),
+            desired_latency: 1.0,
+            decode_ahead: 3.0,
             audio_api_index: None, audio_api_name: None,
             audio_dev_index: None, audio_dev_name: None,
         }
@@ -70,6 +92,10 @@ pub fn read() -> anyhow::Result<()> {
     drop(f);
     let mut prefs = PREFERENCES.write().unwrap();
     *prefs = toml::from_str(&buf[..])?;
+    prefs.desired_latency = prefs.desired_latency.max(MIN_DESIRED_LATENCY)
+        .min(MAX_DESIRED_LATENCY);
+    prefs.decode_ahead = prefs.decode_ahead.max(MIN_DECODE_AHEAD)
+        .min(MAX_DECODE_AHEAD);
     Ok(())
 }
 
@@ -78,6 +104,10 @@ pub fn write() -> anyhow::Result<()> {
     let prefs = PREFERENCES.read().unwrap();
     let mut f = config::open_for_write(PREFS_FILE_NAME)?;
     writeln!(f, "volume = {}", prefs.volume)?;
+    writeln!(f, "desired_latency = {}",
+             Value::Float(prefs.desired_latency))?;
+    writeln!(f, "decode_ahead = {}",
+             Value::Float(prefs.decode_ahead))?;
     writeln!(f, "music_paths = [")?;
     for music_path in prefs.music_paths.iter() {
         writeln!(f, "  {},", Value::String(music_path.to_string()))?;
@@ -119,6 +149,17 @@ pub fn get_volume() -> i32 {
 pub fn set_volume(volume: i32) {
     PREFERENCES.write().unwrap().volume
         = volume.max(MIN_VOLUME).min(MAX_VOLUME)
+}
+
+/// Returns the current target audio latency, in seconds.
+pub fn get_desired_latency() -> f64 {
+    PREFERENCES.read().unwrap().desired_latency
+}
+
+/// Returns the number of seconds to "decode ahead".
+pub fn get_decode_ahead() -> f64 {
+    let prefs = PREFERENCES.read().unwrap();
+    prefs.decode_ahead.max(prefs.desired_latency * 3.0)
 }
 
 /// Returns a copy of the list of music paths.

@@ -20,12 +20,6 @@ use portaudio::{
 use lazy_static::lazy_static;
 use anyhow::anyhow;
 
-/// The amount of data to try to keep in the audio queue. Totally arbitrary.
-const SAMPLES_AHEAD: usize = 100000;
-/// The number of buffers to keep around. (This applies to the audio API,
-/// unlike `SAMPLES_AHEAD`, which applies only to our own queue.)
-const DESIRED_LATENCY: f64 = 1.0;
-
 struct AudioFrame {
     song_id: SongID,
     /// time in seconds from beginning of song that this frame starts at
@@ -219,7 +213,7 @@ fn playback_callback(args: OutputCallbackArgs<f32>) -> StreamCallbackResult {
             true_now // don't add latency, we're hopefully priming buffers
         }
         else {
-            true_now + DESIRED_LATENCY
+            true_now + prefs::get_desired_latency()
         }
     }
     else {
@@ -485,7 +479,7 @@ fn playback_thread_inner_loop(pa: &PortAudio,
     let parameters = Parameters::new(device_index,
                                      channel_count,
                                      true, // interleaved
-                                     DESIRED_LATENCY);
+                                     prefs::get_desired_latency());
     let flags = portaudio::stream_flags
         ::PA_PRIME_OUTPUT_BUFFERS_USING_STREAM_CALLBACK;
     let settings = OutputSettings::with_flags(parameters, sample_rate,
@@ -641,17 +635,19 @@ fn playback_thread_inner_loop(pa: &PortAudio,
 /// Wrapper that repeatedly calls `state.decode_some_frames()` until enough
 /// samples are queued.
 fn decode_some_frames(state: &Arc<Mutex<InternalState>>) {
+    let decode_ahead = prefs::get_decode_ahead();
     // briefly hold the lock to figure out how many frames are queued up
-    let mut sample_count = FRAME_QUEUE.lock().unwrap().iter()
-        .fold(0, |total, el| total + (el.data.len() - el.consumed)
-              / (el.channel_count.max(1) as usize));
+    let mut decoded = FRAME_QUEUE.lock().unwrap().iter()
+        .fold(0.0, |total, el| total + ((el.data.len() - el.consumed)
+                                      / (el.channel_count.max(1) as usize))
+              as f64 / el.sample_rate as f64);
     // (We don't keep the queue locked during the inner loop, because we
     // want to hold up the audio callback as little as possible.)
-    while sample_count < SAMPLES_AHEAD {
+    while decoded < decode_ahead {
         // TODO: end of playback
         let mut state = state.lock().unwrap();
         if state.future_song.is_none() { break }
-        sample_count += state.decode_some_frames(SAMPLES_AHEAD - sample_count);
+        decoded += state.decode_some_frames(decode_ahead - decoded);
     }
 }
 
@@ -755,9 +751,9 @@ impl InternalState {
     }
     /// Figures out what to play next (if relevant), reshuffles playlist (if
     /// relevant), and decodes a few `AudioFrames`. Will stop after the given
-    /// number of samples-per-channel have been decoded, or if the song
-    /// changes. Returns the number of samples decoded.
-    pub fn decode_some_frames(&mut self, sample_count: usize) -> usize {
+    /// number of seconds of audio have been decoded, or if the song changes.
+    /// Returns the number of seconds of audio decoded.
+    pub fn decode_some_frames(&mut self, secs: f64) -> f64 {
         if !self.future_song.is_none() {
             match self.check_stream() {
                 Ok(_) => (),
@@ -766,15 +762,15 @@ impl InternalState {
                            self.future_song.as_ref().unwrap(), x);
                     self.future_stream = None;
                     self.next_song();
-                    return 0;
+                    return 0.0;
                 }
             }
         }
         if !self.future_song.is_none() {
             let song_id = self.future_song.as_ref().unwrap().read().unwrap().get_id();
             if let Some(ref mut av) = self.future_stream {
-                let mut decoded_so_far = 0;
-                while decoded_so_far < sample_count && !self.future_song.is_none() {
+                let mut decoded_so_far = 0.0;
+                while decoded_so_far < secs && !self.future_song.is_none() {
                     let looping = self.future_playlist.as_ref().unwrap().read()
                         .unwrap().get_playmode() == Playmode::LoopOne;
                     let loop_spot: Option<f64> =
@@ -812,7 +808,8 @@ impl InternalState {
                                 }
                             }
                         }
-                        decoded_so_far += data.len() / channel_count as usize;
+                        decoded_so_far += (data.len() / channel_count as usize)
+                            as f64 / sample_rate as f64;
                         FRAME_QUEUE.lock().unwrap().push_back(AudioFrame {
                             song_id, consumed: 0,
                             time: start_time, sample_rate, channel_count, data,
@@ -840,7 +837,7 @@ impl InternalState {
                 return decoded_so_far
             }
         }
-        return 0
+        return 0.0
     }
 }
 
