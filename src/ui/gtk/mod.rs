@@ -349,7 +349,7 @@ impl Controller {
             trace!("playlist_view ends drag");
         });
         playlist_view.connect_drag_failed(|_widget, _context, why| {
-            trace!("playlist_view ends drag ({:?})", why);
+            trace!("playlist_view failed drag ({:?})", why);
             Inhibit(false)
         });
         playlists_view.connect_drag_begin(|_widget, context| {
@@ -360,7 +360,7 @@ impl Controller {
             trace!("playlists_view ends drag");
         });
         playlists_view.connect_drag_failed(|_widget, _context, why| {
-            trace!("playlists_view ends drag ({:?})", why);
+            trace!("playlists_view failed drag ({:?})", why);
             Inhibit(false)
         });
         playlist_view.drag_source_set(ModifierType::BUTTON1_MASK,
