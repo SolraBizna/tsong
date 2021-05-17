@@ -2,6 +2,7 @@ use crate::*;
 use log::error;
 use gtk::{
     prelude::*,
+    Adjustment,
     Align,
     BoxBuilder,
     ButtonBoxBuilder, ButtonBoxStyle,
@@ -13,7 +14,9 @@ use gtk::{
     ListStore,
     Orientation,
     PolicyType,
+    PositionType,
     ResponseType,
+    Scale, ScaleBuilder,
     ScrolledWindowBuilder,
     SeparatorBuilder,
     TreeView, TreeViewBuilder, TreeViewColumn,
@@ -48,6 +51,8 @@ pub struct Controller {
     audiodev_model: ListStore,
     locations_view: TreeView,
     locations_model: ListStore,
+    desired_latency_slider: Scale,
+    decode_ahead_slider: Scale,
 }
 
 impl Controller {
@@ -78,6 +83,44 @@ impl Controller {
         audiodev_view.pack_start(&renderer, true);
         audiodev_view.add_attribute(&renderer, "text", 1);
         big_box.add(&audiodev_view);
+        big_box.add(&LabelBuilder::new()
+                    .label("Desired Latency: (seconds)")
+                    .halign(Align::Start).build());
+        let desired_latency_slider = ScaleBuilder::new()
+            .has_origin(true)
+            .draw_value(true)
+            .value_pos(PositionType::Bottom)
+            .tooltip_text("Amount of audio data to send to the sound card at \
+                           a time. Larger values lead to lower CPU usage, but \
+                           make the volume slider less responsive. (Advanced)")
+            .build();
+        desired_latency_slider.set_digits(2);
+        big_box.add(&desired_latency_slider);
+        big_box.add(&LabelBuilder::new()
+                    .label("Decode Ahead: (seconds)")
+                    .halign(Align::Start).build());
+        let decode_ahead_slider = ScaleBuilder::new()
+            .has_origin(true)
+            .draw_value(true)
+            .value_pos(PositionType::Bottom)
+            .show_fill_level(true)
+            .restrict_to_fill_level(false)
+            .tooltip_text("Amount of song data to decode ahead of playback. \
+                           This will always be at least thrice the desired \
+                           latency.\n\n\
+                           Larger values may lead to lower CPU usage during \
+                           playback, but too large a value could lead to \
+                           large spikes in CPU usage and strange behavior \
+                           of the Next and Previous buttons.\n\n\
+                           (Advanced)")
+            .build();
+        decode_ahead_slider.set_digits(1);
+        big_box.add(&decode_ahead_slider);
+        let decode_ahead_clone = decode_ahead_slider.clone();
+        desired_latency_slider.connect_value_changed(move |slider| {
+            let value = slider.get_value();
+            decode_ahead_clone.set_fill_level(value * 3.0);
+        });
         // The music paths!
         big_box.add(&LabelBuilder::new()
                      .label("Music Locations:").halign(Align::Start).build());
@@ -152,6 +195,7 @@ impl Controller {
             ok_button,
             delete_location_button,
             new_location_button,
+            decode_ahead_slider, desired_latency_slider,
             hostapi_model: ListStore::new(&[Type::U32, Type::String]),
             audiodev_model: ListStore::new(&[Type::U32, Type::String]),
             me: None
@@ -298,6 +342,21 @@ impl Controller {
         self.audiodev_view.set_model(Some(&self.audiodev_model));
         self.audiodev_view.set_active_iter(selected_iter.as_ref());
     }
+    fn populate_sliders(&mut self) -> Option<()> {
+        let desired_latency = prefs::get_desired_latency();
+        let latency_adjustment = Adjustment::new
+            (desired_latency,
+             prefs::MIN_DESIRED_LATENCY, prefs::MAX_DESIRED_LATENCY + 0.1,
+             0.01, 0.1, 0.1);
+        self.desired_latency_slider.set_adjustment(&latency_adjustment);
+        let decode_adjustment = Adjustment::new
+            (prefs::get_decode_ahead(),
+             prefs::MIN_DECODE_AHEAD, prefs::MAX_DECODE_AHEAD + 0.1,
+             0.1, 0.1, 0.1);
+        self.decode_ahead_slider.set_adjustment(&decode_adjustment);
+        self.decode_ahead_slider.set_fill_level(desired_latency * 3.0);
+        None
+    }
     fn populate_locations(&mut self) {
         let src = prefs::get_music_paths();
         self.locations_model.clear();
@@ -329,6 +388,8 @@ impl Controller {
             false
         });
         prefs::set_music_paths(dirs);
+        prefs::set_desired_latency(self.desired_latency_slider.get_value());
+        prefs::set_decode_ahead(self.decode_ahead_slider.get_value());
         let parent = self.parent.upgrade()?;
         parent.try_borrow_mut().ok()?.rescan();
         None
@@ -391,6 +452,7 @@ impl Controller {
         if !self.window.is_visible() {
             self.populate_hostapi();
             self.populate_locations();
+            self.populate_sliders();
             self.window.show_all();
         }
         else {

@@ -54,7 +54,7 @@ fn get_standard_volume() -> i32 { STANDARD_VOLUME }
 /// The lowest permitted target latency.
 pub const MIN_DESIRED_LATENCY: f64 = 0.1;
 /// The standard target latency.
-pub const STANDARD_DESIRED_LATENCY: f64 = 1.0;
+pub const STANDARD_DESIRED_LATENCY: f64 = 0.15;
 /// The highest permitted target latency.
 pub const MAX_DESIRED_LATENCY: f64 = 3.0;
 
@@ -166,10 +166,26 @@ pub fn get_desired_latency() -> f64 {
     PREFERENCES.read().unwrap().desired_latency
 }
 
+/// Alters the desired audio latency, clamping it within `MIN_DESIRED_LATENCY`
+/// and `MAX_DESIRED_LATENCY`.
+pub fn set_desired_latency(desired_latency: f64) {
+    PREFERENCES.write().unwrap().desired_latency
+        = desired_latency.max(MIN_DESIRED_LATENCY).min(MAX_DESIRED_LATENCY)
+}
+
 /// Returns the number of seconds to "decode ahead".
 pub fn get_decode_ahead() -> f64 {
     let prefs = PREFERENCES.read().unwrap();
     prefs.decode_ahead.max(prefs.desired_latency * 3.0)
+}
+
+/// Alters the decode-ahead value, clamping it within `MIN_DECODE_AHEAD` and
+/// `MAX_DECODE_AHEAD` and also to triple the desired latency value.
+pub fn set_decode_ahead(decode_ahead: f64) {
+    let mut prefs = PREFERENCES.write().unwrap();
+    let min = MIN_DECODE_AHEAD.max(prefs.desired_latency * 3.0);
+    prefs.decode_ahead
+        = decode_ahead.max(min).min(MAX_DECODE_AHEAD)
 }
 
 /// Returns a copy of the list of music paths.
