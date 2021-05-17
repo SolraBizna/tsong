@@ -2,6 +2,7 @@
 //! things that are stored in `Tsong.conf` and changed in the "Preferences"
 //! window.
 
+use log::trace;
 use lazy_static::lazy_static;
 use crate::config;
 use toml::Value;
@@ -90,6 +91,7 @@ lazy_static! {
 /// Call at least once, at startup. This will read in saved values for the
 /// preferences.
 pub fn read() -> anyhow::Result<()> {
+    trace!("Reading prefs.");
     let mut f = match config::open_best_for_read(PREFS_FILE_NAME)? {
         Some(f) => f,
         None => {
@@ -111,6 +113,7 @@ pub fn read() -> anyhow::Result<()> {
 
 /// Call to save changes to the preferences.
 pub fn write() -> anyhow::Result<()> {
+    trace!("Writing prefs.");
     let prefs = PREFERENCES.read().unwrap();
     let mut f = config::open_for_write(PREFS_FILE_NAME)?;
     writeln!(f, "volume = {}", prefs.volume)?;
