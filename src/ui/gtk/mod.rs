@@ -1985,7 +1985,11 @@ pub fn go() {
         Some("name.bizna.tsong"),
         Default::default(),
     ).expect("failed to initialize the GTK application (!?!)");
-    application.connect_activate(|application| {
+    application.connect_activate(|_|{});
+    // Create our main window at startup, not at activate, so that multiple
+    // instances of the main window don't end up appearing and fighting their
+    // alternate-timeline counterparts Rick and Morty style.
+    application.connect_startup(|application| {
         // Controller will hook itself in and keep track of its own lifetime
         let _ = Controller::new(application);
     });
