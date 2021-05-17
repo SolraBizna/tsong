@@ -289,8 +289,10 @@ impl Controller {
     }
     fn get_selected_dev(&mut self) -> Option<u32> {
         let iter = self.audiodev_view.get_active_iter().unwrap();
-        self.audiodev_model.get_value(&iter, 0).get::<u32>()
-            .unwrap()
+        let ret = self.audiodev_model.get_value(&iter, 0).get::<u32>()
+            .unwrap().unwrap();
+        if ret == u32::MAX { None }
+        else { Some(ret) }
     }
     fn populate_audiodev(&mut self) {
         let selected_api_index = self.get_selected_api();
@@ -298,6 +300,7 @@ impl Controller {
             .unwrap();
         self.audiodev_model.clear();
         let new_row = self.audiodev_model.append();
+        self.audiodev_model.set_value(&new_row, 0, &u32::MAX.to_value());
         self.audiodev_model.set_value(&new_row, 1,
                                       &"Default Device".to_value());
         let mut selected_iter = self.audiodev_model.get_iter_first();
