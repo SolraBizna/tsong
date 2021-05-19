@@ -733,6 +733,25 @@ context.drag_finish(res.0, res.1, time);
             let _ = controller.try_borrow()
                 .map(|x| x.update_selected_songs());
         });
+        let controller = nu.clone();
+        this.window.connect_delete_event(move |window, _| {
+            let busy = controller.try_borrow_mut().unwrap()
+                .background_task_in_progress();
+            if busy {
+                let confirm = MessageDialog::new
+                    (Some(window), DialogFlags::MODAL, MessageType::Warning,
+                     ButtonsType::OkCancel,
+                     "There is a background task in progress. If you quit \
+                      now, the task will be left half-finished.\n\n\
+                      Are you sure you want to quit?");
+                let result = confirm.run();
+                confirm.close();
+                Inhibit(result == ResponseType::Cancel)
+            }
+            else {
+                Inhibit(false)
+            }
+        });
         this.activate_playlist_by_path(&TreePath::new_first());
         this.force_periodic();
         // okay, show the window and away we go
@@ -1151,8 +1170,8 @@ context.drag_finish(res.0, res.1, time);
     fn force_spinner_start(&self) {
         self.scan_spinner.start();
     }
-    fn update_scan_status(&mut self) {
-        let scan_in_progess = match self.scan_thread.get_result_nonblocking() {
+    fn background_task_in_progress(&mut self) -> bool {
+        let scan_in_progress = match self.scan_thread.get_result_nonblocking(){
             Err(x) => {
                 // TODO: display this error
                 error!("Scan thread crashed! {:?}", x);
@@ -1172,9 +1191,12 @@ context.drag_finish(res.0, res.1, time);
                 true
             },
         };
-        if scan_in_progess
-        || self.playlist_edit_controller.as_ref().unwrap().borrow()
-            .script_is_in_progress() {
+        scan_in_progress
+            || self.playlist_edit_controller.as_ref().unwrap().borrow()
+            .script_is_in_progress()
+    }
+    fn update_scan_status(&mut self) {
+        if self.background_task_in_progress() {
             self.scan_spinner.start();
         }
         else {
