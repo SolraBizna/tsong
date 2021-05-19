@@ -115,6 +115,7 @@ pub struct Controller {
     settings_button: ToggleButton,
     shuffle_button: ToggleButton,
     volume_scale: Scale,
+    volume_label: Label,
     window: ApplicationWindow,
     playlist_generation: GenerationValue,
     errors_generation: GenerationValue,
@@ -230,8 +231,9 @@ impl Controller {
         volume_overlay.add_overlay(&loud_icon);
         volume_overlay.add_overlay(&volume_scale);
         control_box.add(&volume_overlay);
+        let volume_label_clone = volume_label.clone();
         volume_scale.connect_value_changed(move |volume_scale| {
-            set_volume_label(volume_scale, &volume_label)
+            set_volume_label(volume_scale, &volume_label_clone)
         });
         // Button to "roll up" the playlist box:
         let rollup_button = ButtonBuilder::new()
@@ -486,7 +488,7 @@ impl Controller {
         let nu = Rc::new(RefCell::new(Controller {
             rollup_button, settings_button, prev_button, next_button,
             shuffle_button, playmode_button, play_button, volume_scale,
-            playlists_view, playlist_view,
+            volume_label, playlists_view, playlist_view,
             playlists_model, playlist_model, playlist_stats, osd,
             scan_spinner, scan_thread, rollup_grid, control_box,
             new_playlist_button, delete_playlist_button,
@@ -1825,6 +1827,9 @@ context.drag_finish(res.0, res.1, time);
         self.force_periodic_soon();
         None
     }
+    fn update_volume_slider(&mut self) {
+        set_volume_label(&self.volume_scale, &self.volume_label)
+    }
 }
 
 impl RemoteTarget for Controller {
@@ -2225,8 +2230,13 @@ fn set_volume_label(scale: &Scale, label: &Label) {
         label.get_style_context().remove_class("overblood");
     }
     if val > 0 {
-        let db = playback::volume_to_db(val);
-        label.set_label(&format!("{}% ({:+.2}dB)", val, db))
+        if prefs::get_show_decibels_on_volume_slider() {
+            let db = playback::volume_to_db(val);
+            label.set_label(&format!("{}% ({:+.2}dB)", val, db))
+        }
+        else {
+            label.set_label(&format!("{}%", val))
+        }
     }
     else {
         label.set_label("Muted"); // TODO: i18n

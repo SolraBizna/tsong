@@ -24,6 +24,8 @@ pub struct Preferences {
     #[serde(default = "get_standard_volume")]
     volume: i32,
     #[serde(default)]
+    show_decibels_on_volume_slider: bool,
+    #[serde(default)]
     music_paths: Vec<String>,
     #[serde(default = "get_standard_desired_latency")]
     desired_latency: f64,
@@ -74,6 +76,7 @@ impl Default for Preferences {
     fn default() -> Self {
         Preferences {
             volume: STANDARD_VOLUME,
+            show_decibels_on_volume_slider: false,
             music_paths: Vec::new(),
             desired_latency: STANDARD_DESIRED_LATENCY,
             decode_ahead: STANDARD_DECODE_AHEAD,
@@ -117,6 +120,8 @@ pub fn write() -> anyhow::Result<()> {
     let prefs = PREFERENCES.read().unwrap();
     let mut f = config::open_for_write(PREFS_FILE_NAME)?;
     writeln!(f, "volume = {}", prefs.volume)?;
+    writeln!(f, "show_decibels_on_volume_slider = {}",
+             prefs.show_decibels_on_volume_slider)?;
     writeln!(f, "desired_latency = {}",
              Value::Float(prefs.desired_latency))?;
     writeln!(f, "decode_ahead = {}",
@@ -162,6 +167,16 @@ pub fn get_volume() -> i32 {
 pub fn set_volume(volume: i32) {
     PREFERENCES.write().unwrap().volume
         = volume.max(MIN_VOLUME).min(MAX_VOLUME)
+}
+
+/// Returns true if the user wants to see dB, false otherwise.
+pub fn get_show_decibels_on_volume_slider() -> bool {
+    PREFERENCES.read().unwrap().show_decibels_on_volume_slider
+}
+
+/// Alters whether the user wants to see dB.
+pub fn set_show_decibels_on_volume_slider(nu: bool) {
+    PREFERENCES.write().unwrap().show_decibels_on_volume_slider = nu
 }
 
 /// Returns the current target audio latency, in seconds.

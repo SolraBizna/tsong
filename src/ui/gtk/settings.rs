@@ -8,6 +8,7 @@ use gtk::{
     ButtonBoxBuilder, ButtonBoxStyle,
     Button, ButtonBuilder,
     CellRendererText,
+    CheckButton,
     ComboBox, ComboBoxBuilder,
     FileChooserDialog, FileChooserAction,
     LabelBuilder,
@@ -45,6 +46,7 @@ pub struct Controller {
     ok_button: Button,
     delete_location_button: Button,
     new_location_button: Button,
+    show_decibels_box: CheckButton,
     hostapi_view: ComboBox,
     hostapi_model: ListStore,
     audiodev_view: ComboBox,
@@ -121,6 +123,10 @@ impl Controller {
             let value = slider.get_value();
             decode_ahead_clone.set_fill_level(value * 3.0);
         });
+        // A checkbox!
+        let show_decibels_box = CheckButton::with_label
+            ("Show decibels on volume slider");
+        big_box.add(&show_decibels_box);
         // The music paths!
         big_box.add(&LabelBuilder::new()
                      .label("Music Locations:").halign(Align::Start).build());
@@ -196,6 +202,7 @@ impl Controller {
             delete_location_button,
             new_location_button,
             decode_ahead_slider, desired_latency_slider,
+            show_decibels_box,
             hostapi_model: ListStore::new(&[Type::U32, Type::String]),
             audiodev_model: ListStore::new(&[Type::U32, Type::String]),
             me: None
@@ -393,8 +400,12 @@ impl Controller {
         prefs::set_music_paths(dirs);
         prefs::set_desired_latency(self.desired_latency_slider.get_value());
         prefs::set_decode_ahead(self.decode_ahead_slider.get_value());
+        prefs::set_show_decibels_on_volume_slider(self.show_decibels_box
+                                                  .get_active());
         let parent = self.parent.upgrade()?;
-        parent.try_borrow_mut().ok()?.rescan();
+        let mut parent = parent.try_borrow_mut().ok()?;
+        parent.update_volume_slider();
+        parent.rescan();
         None
     }
     fn clicked_cancel(&mut self) {
@@ -456,6 +467,8 @@ impl Controller {
             self.populate_hostapi();
             self.populate_locations();
             self.populate_sliders();
+            self.show_decibels_box.set_active
+                (prefs::get_show_decibels_on_volume_slider());
             self.window.show_all();
         }
         else {
