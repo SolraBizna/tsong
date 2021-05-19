@@ -57,7 +57,7 @@ pub const MAX_VOLUME: i32 = 200;
 fn get_standard_volume() -> i32 { STANDARD_VOLUME }
 
 /// The lowest permitted target latency.
-pub const MIN_DESIRED_LATENCY: f64 = 0.1;
+pub const MIN_DESIRED_LATENCY: f64 = 0.01;
 /// The standard target latency.
 pub const STANDARD_DESIRED_LATENCY: f64 = 0.15;
 /// The highest permitted target latency.
