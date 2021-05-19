@@ -168,9 +168,14 @@ pub fn get_volume() -> i32 {
 
 /// Alters the setting of the volume slider, clamping it within `MIN_VOLUME`
 /// and `MAX_VOLUME`.
-pub fn set_volume(volume: i32) {
-    PREFERENCES.write().unwrap().volume
-        = volume.max(MIN_VOLUME).min(MAX_VOLUME)
+///
+/// Returns true if playback should be restarted as a result of this change.
+/// (Currently always returns false.)
+pub fn set_volume(volume: i32) -> bool {
+    let mut prefs = PREFERENCES.write().unwrap();
+    let nu = volume.max(MIN_VOLUME).min(MAX_VOLUME);
+    prefs.volume = nu;
+    false
 }
 
 /// Returns true if the user wants to see dB, false otherwise.
@@ -179,8 +184,13 @@ pub fn get_show_decibels_on_volume_slider() -> bool {
 }
 
 /// Alters whether the user wants to see dB.
-pub fn set_show_decibels_on_volume_slider(nu: bool) {
-    PREFERENCES.write().unwrap().show_decibels_on_volume_slider = nu
+///
+/// Returns true if playback should be restarted as a result of this change.
+/// (Currently always returns false.)
+pub fn set_show_decibels_on_volume_slider(nu: bool) -> bool {
+    let mut prefs = PREFERENCES.write().unwrap();
+    prefs.show_decibels_on_volume_slider = nu;
+    false
 }
 
 /// Returns true if the user wants us to resample audio.
@@ -189,8 +199,14 @@ pub fn get_resample_audio() -> bool {
 }
 
 /// Alters whether the user wants us to resample audio.
-pub fn set_resample_audio(nu: bool) {
-    PREFERENCES.write().unwrap().resample_audio = nu
+///
+/// Returns true if playback should be restarted as a result of this change.
+pub fn set_resample_audio(nu: bool) -> bool {
+    let mut prefs = PREFERENCES.write().unwrap();
+    if prefs.resample_audio != nu {
+        prefs.resample_audio = nu;
+        true
+    } else { false }
 }
 
 /// Returns the current target audio latency, in seconds.
@@ -200,9 +216,15 @@ pub fn get_desired_latency() -> f64 {
 
 /// Alters the desired audio latency, clamping it within `MIN_DESIRED_LATENCY`
 /// and `MAX_DESIRED_LATENCY`.
-pub fn set_desired_latency(desired_latency: f64) {
-    PREFERENCES.write().unwrap().desired_latency
-        = desired_latency.max(MIN_DESIRED_LATENCY).min(MAX_DESIRED_LATENCY)
+///
+/// Returns true if playback should be restarted as a result of this change.
+pub fn set_desired_latency(desired_latency: f64) -> bool {
+    let mut prefs = PREFERENCES.write().unwrap();
+    let nu = desired_latency.max(MIN_DESIRED_LATENCY).min(MAX_DESIRED_LATENCY);
+    if prefs.desired_latency != nu {
+        prefs.desired_latency = nu;
+        true
+    } else { false }
 }
 
 /// Returns the number of seconds to "decode ahead".
@@ -213,11 +235,15 @@ pub fn get_decode_ahead() -> f64 {
 
 /// Alters the decode-ahead value, clamping it within `MIN_DECODE_AHEAD` and
 /// `MAX_DECODE_AHEAD` and also to triple the desired latency value.
-pub fn set_decode_ahead(decode_ahead: f64) {
+///
+/// Returns true if playback should be restarted as a result of this change.
+/// (Currently always returns false.)
+pub fn set_decode_ahead(decode_ahead: f64) -> bool {
     let mut prefs = PREFERENCES.write().unwrap();
     let min = MIN_DECODE_AHEAD.max(prefs.desired_latency * 3.0);
-    prefs.decode_ahead
-        = decode_ahead.max(min).min(MAX_DECODE_AHEAD)
+    let nu = decode_ahead.max(min).min(MAX_DECODE_AHEAD);
+    prefs.decode_ahead = nu;
+    false
 }
 
 /// Returns a copy of the list of music paths.
@@ -278,28 +304,43 @@ pub fn get_chosen_audio_device_for_api(pa: &PortAudio,
     None
 }
 
+/// Sets the user's choices of audio API and device.
+///
+/// Returns true if playback should be restarted as a result of this change.
 pub fn set_chosen_audio_api_and_device(pa: &PortAudio,
                                        api_index: HostApiIndex,
                                        api_name: &str,
-                                       dev: Option<(u32,&str)>) {
+                                       dev: Option<(u32,&str)>) -> bool {
     let default = pa.default_host_api().unwrap();
-    let mut prefs = PREFERENCES.write().unwrap();
+    let (new_audio_api_index, new_audio_api_name,
+         new_audio_dev_index, new_audio_dev_name);
     if api_index == default {
-        prefs.audio_api_index = None;
-        prefs.audio_api_name = None;
+        new_audio_api_index = None;
+        new_audio_api_name = None;
     }
     else {
-        prefs.audio_api_index = Some(api_index as u32);
-        prefs.audio_api_name = Some(api_name.to_owned());
+        new_audio_api_index = Some(api_index as u32);
+        new_audio_api_name = Some(api_name.to_owned());
     }
     match dev {
         None => {
-            prefs.audio_dev_index = None;
-            prefs.audio_dev_name = None;
+            new_audio_dev_index = None;
+            new_audio_dev_name = None;
         },
         Some((dev_index, dev_name)) => {
-            prefs.audio_dev_index = Some(dev_index);
-            prefs.audio_dev_name = Some(dev_name.to_owned());
+            new_audio_dev_index = Some(dev_index);
+            new_audio_dev_name = Some(dev_name.to_owned());
         },
     }
+    let mut prefs = PREFERENCES.write().unwrap();
+    if prefs.audio_api_index != new_audio_api_index
+        || prefs.audio_api_name != new_audio_api_name
+        || prefs.audio_dev_index != new_audio_dev_index
+        || prefs.audio_dev_name != new_audio_dev_name {
+            prefs.audio_api_index = new_audio_api_index;
+            prefs.audio_api_name = new_audio_api_name;
+            prefs.audio_dev_index = new_audio_dev_index;
+            prefs.audio_dev_name = new_audio_dev_name;
+            true
+        } else { false }
 }

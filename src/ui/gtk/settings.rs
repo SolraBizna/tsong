@@ -395,8 +395,6 @@ impl Controller {
             let dev_info = self.pa.device_info(global_dev_index).unwrap();
             (dev_index, dev_info.name)
         });
-        prefs::set_chosen_audio_api_and_device(&self.pa, api_index,
-                                               api_info.name, dev);
         let mut dirs = Vec::new();
         self.locations_model.foreach(|model, _path, iter| {
             let value = model.get_value(&iter, 0);
@@ -407,11 +405,34 @@ impl Controller {
             false
         });
         prefs::set_music_paths(dirs);
-        prefs::set_desired_latency(self.desired_latency_slider.get_value());
-        prefs::set_decode_ahead(self.decode_ahead_slider.get_value());
-        prefs::set_show_decibels_on_volume_slider(self.show_decibels_box
-                                                  .get_active());
-        prefs::set_resample_audio(self.resample_audio_box.get_active());
+        // (we wrote this or-chain this way because we don't want a short
+        // circuiting OR)
+        let mut needs_restart = false;
+        needs_restart =
+            prefs::set_chosen_audio_api_and_device
+            (&self.pa, api_index, api_info.name, dev)
+            || needs_restart;
+        needs_restart =
+            prefs::set_desired_latency
+            (self.desired_latency_slider.get_value())
+            || needs_restart;
+        needs_restart =
+            prefs::set_decode_ahead(self.decode_ahead_slider.get_value())
+            || needs_restart;
+        needs_restart =
+            prefs::set_show_decibels_on_volume_slider
+            (self.show_decibels_box.get_active())
+            || needs_restart;
+        needs_restart =
+            prefs::set_resample_audio(self.resample_audio_box.get_active())
+            || needs_restart;
+        if needs_restart {
+            if playback::get_playback_status() == PlaybackStatus::Playing {
+                // force playback to be restarted
+                playback::send_command(PlaybackCommand::Pause);
+                playback::send_command(PlaybackCommand::Play(None));
+            }
+        }
         let parent = self.parent.upgrade()?;
         let mut parent = parent.try_borrow_mut().ok()?;
         parent.update_volume_slider();
