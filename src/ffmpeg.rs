@@ -11,6 +11,7 @@ use std::{
     ptr::null_mut,
     mem::transmute,
 };
+use crate::bufring;
 
 /// Turn an FFMPEG error code into an error string.
 fn ffres_to_string(code: libc::c_int) -> String {
@@ -276,8 +277,7 @@ impl AVFormat {
                 / (stream_ref.time_base.den as f64);
             let sample_rate = frame.sample_rate as f64;
             let channel_count = frame.channels as i32;
-            // TODO: recycle buffers
-            let mut buf = Vec::new();
+            let mut buf = bufring::get_buf();
             match frame.format {
                 ff::AVSampleFormat_AV_SAMPLE_FMT_U8 =>
                     expand_packed_audio::<u8>(frame, &mut buf),

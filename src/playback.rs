@@ -46,10 +46,13 @@ impl ResampleStateOptionImplHack for Option<ResampleState> {
             };
             if need_recreate {
                 if let Some(me) = self {
-                    let mut buf = vec![0.0; 256]; // better be enough
+                    let mut buf = bufring::get_buf();
+                    buf.resize(512, 0.0); // hopefully enough
+                    // TODO: when that issue is fixed, change here too
+                    let buf_len = buf.len();
                     let (_, out_floats) = me.soxr.process::<f32,f32>
-                        (None, &mut buf[..])?;
-                    buf.resize(out_floats, 0.0);
+                        (None, &mut buf[..buf_len / me.channel_count as usize])?;
+                    buf.resize(out_floats * me.channel_count as usize, 0.0);
                     FRAME_QUEUE.lock().unwrap().push_back(AudioFrame {
                         song_id: frame.song_id,
                         time: frame.time,
@@ -77,9 +80,9 @@ impl ResampleStateOptionImplHack for Option<ResampleState> {
             }
             if let Some(me) = self {
                 // TODO: When issue #4 in libsoxr-rs is fixed, remove the hack
-                let mut buf = vec![0.0;
-                                   (frame.data.len() as f64 * me.output_rate
-                                    / me.input_rate).ceil() as usize + 200];
+                let mut buf = bufring::get_buf();
+                buf.resize((frame.data.len() as f64 * me.output_rate
+                            / me.input_rate).ceil() as usize + 200, 0.0);
                 let mut rem = &frame.data[..];
                 let mut buf_pos = 0;
                 while rem.len() > 0 {
@@ -124,6 +127,14 @@ struct AudioFrame {
     data: Vec<f32>, // hooray! lots of copying!
     /// number of indices within data that have been consumed
     consumed: usize,
+}
+
+impl Drop for AudioFrame {
+    fn drop(&mut self) {
+        let mut buf = Vec::new();
+        std::mem::swap(&mut self.data, &mut buf);
+        bufring::finished_with_buf(buf);
+    }
 }
 
 #[derive(Debug)]

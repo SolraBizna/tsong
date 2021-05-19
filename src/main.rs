@@ -12,6 +12,7 @@ mod db;
 mod ui;
 mod remote;
 mod errors;
+mod bufring;
 
 use reference::Reference;
 use generation::{GenerationTracker, GenerationValue, NOT_GENERATED};
