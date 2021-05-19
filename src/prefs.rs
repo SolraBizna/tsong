@@ -31,6 +31,8 @@ pub struct Preferences {
     desired_latency: f64,
     #[serde(default = "get_standard_decode_ahead")]
     decode_ahead: f64,
+    #[serde(default)]
+    resample_audio: bool,
     // these two must both match in order for the choice to be considered valid
     #[serde(default)]
     audio_api_index: Option<u32>,
@@ -80,6 +82,7 @@ impl Default for Preferences {
             music_paths: Vec::new(),
             desired_latency: STANDARD_DESIRED_LATENCY,
             decode_ahead: STANDARD_DECODE_AHEAD,
+            resample_audio: false,
             audio_api_index: None, audio_api_name: None,
             audio_dev_index: None, audio_dev_name: None,
         }
@@ -131,6 +134,7 @@ pub fn write() -> anyhow::Result<()> {
         writeln!(f, "  {},", Value::String(music_path.to_string()))?;
     }
     writeln!(f, "]")?;
+    writeln!(f, "resample_audio = {}", prefs.resample_audio)?;
     match (prefs.audio_api_index, prefs.audio_api_name.as_ref()) {
         (Some(index), Some(name)) => {
             write!(f, "\n\
@@ -177,6 +181,16 @@ pub fn get_show_decibels_on_volume_slider() -> bool {
 /// Alters whether the user wants to see dB.
 pub fn set_show_decibels_on_volume_slider(nu: bool) {
     PREFERENCES.write().unwrap().show_decibels_on_volume_slider = nu
+}
+
+/// Returns true if the user wants us to resample audio.
+pub fn get_resample_audio() -> bool {
+    PREFERENCES.read().unwrap().resample_audio
+}
+
+/// Alters whether the user wants us to resample audio.
+pub fn set_resample_audio(nu: bool) {
+    PREFERENCES.write().unwrap().resample_audio = nu
 }
 
 /// Returns the current target audio latency, in seconds.

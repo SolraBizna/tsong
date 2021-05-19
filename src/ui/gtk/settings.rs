@@ -46,6 +46,7 @@ pub struct Controller {
     ok_button: Button,
     delete_location_button: Button,
     new_location_button: Button,
+    resample_audio_box: CheckButton,
     show_decibels_box: CheckButton,
     hostapi_view: ComboBox,
     hostapi_model: ListStore,
@@ -124,6 +125,14 @@ impl Controller {
             decode_ahead_clone.set_fill_level(value * 3.0);
         });
         // A checkbox!
+        let resample_audio_box = CheckButton::with_label
+            ("Resample audio");
+        resample_audio_box.set_tooltip_text
+            (Some("If checked, we will resample all audio to the best native \
+                   sample rate for the selected output device. If unchecked, \
+                   we will let the OS handle that for us. (Advanced)"));
+        big_box.add(&resample_audio_box);
+        // Another checkbox!
         let show_decibels_box = CheckButton::with_label
             ("Show decibels on volume slider");
         big_box.add(&show_decibels_box);
@@ -202,7 +211,7 @@ impl Controller {
             delete_location_button,
             new_location_button,
             decode_ahead_slider, desired_latency_slider,
-            show_decibels_box,
+            resample_audio_box, show_decibels_box,
             hostapi_model: ListStore::new(&[Type::U32, Type::String]),
             audiodev_model: ListStore::new(&[Type::U32, Type::String]),
             me: None
@@ -402,6 +411,7 @@ impl Controller {
         prefs::set_decode_ahead(self.decode_ahead_slider.get_value());
         prefs::set_show_decibels_on_volume_slider(self.show_decibels_box
                                                   .get_active());
+        prefs::set_resample_audio(self.resample_audio_box.get_active());
         let parent = self.parent.upgrade()?;
         let mut parent = parent.try_borrow_mut().ok()?;
         parent.update_volume_slider();
@@ -469,6 +479,7 @@ impl Controller {
             self.populate_sliders();
             self.show_decibels_box.set_active
                 (prefs::get_show_decibels_on_volume_slider());
+            self.resample_audio_box.set_active(prefs::get_resample_audio());
             self.window.show_all();
         }
         else {

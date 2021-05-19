@@ -9,7 +9,7 @@ use std::{
     collections::VecDeque,
     sync::{Arc, Mutex, atomic::Ordering},
     sync::mpsc::{Sender, Receiver, channel},
-    time::{Instant, Duration},
+    time::Instant,
 };
 
 use portaudio::{
@@ -19,7 +19,102 @@ use portaudio::{
 };
 use lazy_static::lazy_static;
 use anyhow::anyhow;
+use libsoxr::Soxr;
 
+/// Internal state used when resampling audio. Wraps `libsoxr`.
+struct ResampleState {
+    input_rate: f64,
+    output_rate: f64,
+    channel_count: i32,
+    soxr: Soxr,
+}
+
+trait ResampleStateOptionImplHack {
+    fn output(&mut self, native_sample_rate: Option<f64>, frame: AudioFrame)
+        -> anyhow::Result<()>;
+}
+
+impl ResampleStateOptionImplHack for Option<ResampleState> {
+    fn output(&mut self, native_sample_rate: Option<f64>, frame: AudioFrame)
+        -> anyhow::Result<()> {
+        if let Some(native_sample_rate) = native_sample_rate {
+            let need_recreate = match self {
+                Some(x) => x.output_rate != native_sample_rate // never true?
+                    || x.input_rate != frame.sample_rate
+                    || x.channel_count != frame.channel_count,
+                None => frame.sample_rate != native_sample_rate,
+            };
+            if need_recreate {
+                if let Some(me) = self {
+                    let mut buf = vec![0.0; 256]; // better be enough
+                    let (_, out_floats) = me.soxr.process::<f32,f32>
+                        (None, &mut buf[..])?;
+                    buf.resize(out_floats, 0.0);
+                    FRAME_QUEUE.lock().unwrap().push_back(AudioFrame {
+                        song_id: frame.song_id,
+                        time: frame.time,
+                        sample_rate: native_sample_rate,
+                        channel_count: me.channel_count,
+                        data: buf,
+                        consumed: 0,
+                    });
+                }
+                if native_sample_rate == frame.sample_rate {
+                    *self = None;
+                }
+                else {
+                    let new_resampler = ResampleState {
+                        input_rate: frame.sample_rate,
+                        output_rate: native_sample_rate,
+                        channel_count: frame.channel_count,
+                        soxr:
+                        Soxr::create(frame.sample_rate, native_sample_rate,
+                                     frame.channel_count as u32,
+                                     None, None, None)?,
+                    };
+                    *self = Some(new_resampler);
+                }
+            }
+            if let Some(me) = self {
+                // TODO: When issue #4 in libsoxr-rs is fixed, remove the hack
+                let mut buf = vec![0.0;
+                                   (frame.data.len() as f64 * me.output_rate
+                                    / me.input_rate).ceil() as usize + 200];
+                let mut rem = &frame.data[..];
+                let mut buf_pos = 0;
+                while rem.len() > 0 {
+                    let rem_len = rem.len();
+                    let out = &mut buf[buf_pos..];
+                    let out_len = out.len();
+                    let (in_frames, out_frames) = me.soxr.process
+                        (Some(&rem[..rem_len / me.channel_count as usize]),
+                         &mut out[..out_len / me.channel_count as usize])?;
+                    let in_floats = in_frames * me.channel_count as usize;
+                    let out_floats = out_frames * me.channel_count as usize;
+                    rem = &rem[in_floats..];
+                    buf_pos += out_floats;
+                    if rem.len() > 0 {
+                        buf.resize(buf.len() * 2, 0.0);
+                    }
+                }
+                let mut frame = frame;
+                frame.data = buf;
+                frame.data.resize(buf_pos, 0.0);
+                frame.sample_rate = native_sample_rate;
+                FRAME_QUEUE.lock().unwrap().push_back(frame);
+            }
+            else {
+                FRAME_QUEUE.lock().unwrap().push_back(frame);
+            }
+        }
+        else {
+            FRAME_QUEUE.lock().unwrap().push_back(frame);
+        }
+        Ok(())
+    }
+}
+
+/// A chunk of audio, ready to be sent to the sound card.
 struct AudioFrame {
     song_id: SongID,
     /// time in seconds from beginning of song that this frame starts at
@@ -427,8 +522,13 @@ fn playback_thread(state: Arc<Mutex<InternalState>>,
                 Err(x) => {
                     error!("in playback thread: {}", x);
                     errors::from("Playback Thread", x.to_string());
-                    error!("(we'll try again in a few moments)");
-                    std::thread::sleep(Duration::from_secs(3));
+                    let mut state = state.lock().unwrap();
+                    if state.status != PlaybackStatus::Stopped {
+                        state.status = PlaybackStatus::Paused;
+                        if let Err(x) = state.reset_to_heard_point() {
+                            error!("{}", x);
+                        }
+                    }
                 },
             }
         }
@@ -446,21 +546,6 @@ fn playback_thread_inner_loop(pa: &PortAudio,
     if state.lock().unwrap().status != PlaybackStatus::Playing {
         return Ok(())
     }
-    let (sample_rate, channel_count) = {
-        decode_some_frames(&state);
-        // double lock in the common case :(
-        match FRAME_QUEUE.lock().unwrap().get(0) {
-            None => {
-                state.lock().unwrap().status
-                    = PlaybackStatus::Stopped;
-                return Ok(())
-            },
-            Some(ref x) =>
-                (x.sample_rate, x.channel_count),
-        }
-    };
-    *CURRENT_AUDIO_FORMAT.lock().unwrap()
-        = (sample_rate, channel_count);
     // Time to open a new stream...
     let hostapi_index = prefs::get_chosen_audio_api(&pa);
     let device_index = prefs::get_chosen_audio_device_for_api
@@ -476,6 +561,27 @@ fn playback_thread_inner_loop(pa: &PortAudio,
                     .or_else(|_| Err(anyhow!("No default output device?")))?
             }
     };
+    let native_sample_rate = if prefs::get_resample_audio() {
+        let info = pa.device_info(device_index)?;
+        if info.default_sample_rate < 1.0 { Some(44100.0) }
+        else { Some(info.default_sample_rate) }
+    } else { None };
+    let mut resample_state = None;
+    let (sample_rate, channel_count) = {
+        decode_some_frames(&state, native_sample_rate, &mut resample_state);
+        // double lock in the common case :(
+        match FRAME_QUEUE.lock().unwrap().get(0) {
+            None => {
+                state.lock().unwrap().status
+                    = PlaybackStatus::Stopped;
+                return Ok(())
+            },
+            Some(ref x) =>
+                (x.sample_rate, x.channel_count),
+        }
+    };
+    *CURRENT_AUDIO_FORMAT.lock().unwrap()
+        = (sample_rate, channel_count);
     let parameters = Parameters::new(device_index,
                                      channel_count,
                                      true, // interleaved
@@ -490,7 +596,7 @@ fn playback_thread_inner_loop(pa: &PortAudio,
     // just in case...
     REPORT_QUEUE.lock().unwrap().clear();
     BROKEN_STREAM_TIME.store(false, Ordering::Relaxed);
-    decode_some_frames(&state);
+    decode_some_frames(&state, native_sample_rate, &mut resample_state);
     stream.start()
         .or_else(|x| Err(anyhow!("Unable to start audio stream: {}", x)))?;
     let mut sample_rate_changing = false;
@@ -596,7 +702,7 @@ fn playback_thread_inner_loop(pa: &PortAudio,
         drop(report_queue);
         // ...so that we're not holding it during the (expensive)
         // decoding step
-        decode_some_frames(&state);
+        decode_some_frames(&state, native_sample_rate, &mut resample_state);
     }
     // Clean up!
     let _ = stream.abort();
@@ -612,16 +718,7 @@ fn playback_thread_inner_loop(pa: &PortAudio,
         PlaybackStatus::Paused => {
             // Whatever song the user was hearing when they hit pause,
             // that's where we paused.
-            let (cur_song, timestamp) = state.active_song.as_ref().map(|(x,y)| (x.clone(), *y)).ok_or_else(|| anyhow!("Paused, but there is no current song?"))?;
-            if Some(&cur_song) != state.future_song.as_ref() {
-                state.future_song = Some(cur_song);
-                state.future_stream = None;
-            }
-            if state.check_stream().is_ok() {
-                if let Some(stream) = state.future_stream.as_mut() {
-                    stream.seek_to_time(timestamp);
-                }
-            }
+            state.reset_to_heard_point()?;
         },
         PlaybackStatus::Stopped => {
             // There is no longer an active song.
@@ -634,7 +731,9 @@ fn playback_thread_inner_loop(pa: &PortAudio,
 
 /// Wrapper that repeatedly calls `state.decode_some_frames()` until enough
 /// samples are queued.
-fn decode_some_frames(state: &Arc<Mutex<InternalState>>) {
+fn decode_some_frames(state: &Arc<Mutex<InternalState>>,
+                      native_sample_rate: Option<f64>,
+                      resample_state: &mut Option<ResampleState>) {
     let decode_ahead = prefs::get_decode_ahead();
     // briefly hold the lock to figure out how many frames are queued up
     let mut decoded = FRAME_QUEUE.lock().unwrap().iter()
@@ -647,7 +746,9 @@ fn decode_some_frames(state: &Arc<Mutex<InternalState>>) {
         // TODO: end of playback
         let mut state = state.lock().unwrap();
         if state.future_song.is_none() { break }
-        decoded += state.decode_some_frames(decode_ahead - decoded);
+        decoded += state.decode_some_frames(decode_ahead - decoded,
+                                            native_sample_rate,
+                                            resample_state);
     }
 }
 
@@ -753,7 +854,10 @@ impl InternalState {
     /// relevant), and decodes a few `AudioFrames`. Will stop after the given
     /// number of seconds of audio have been decoded, or if the song changes.
     /// Returns the number of seconds of audio decoded.
-    pub fn decode_some_frames(&mut self, secs: f64) -> f64 {
+    pub fn decode_some_frames(&mut self, secs: f64,
+                              native_sample_rate: Option<f64>,
+                              resample_state: &mut Option<ResampleState>)
+    -> f64 {
         if !self.future_song.is_none() {
             match self.check_stream() {
                 Ok(_) => (),
@@ -810,10 +914,18 @@ impl InternalState {
                         }
                         decoded_so_far += (data.len() / channel_count as usize)
                             as f64 / sample_rate as f64;
-                        FRAME_QUEUE.lock().unwrap().push_back(AudioFrame {
-                            song_id, consumed: 0,
-                            time: start_time, sample_rate, channel_count, data,
-                        });
+                        let res =
+                            resample_state.output(native_sample_rate,
+                                                  AudioFrame {
+                                                      song_id, consumed: 0,
+                                                      time: start_time,
+                                                      sample_rate: sample_rate,
+                                                      channel_count, data,
+                                                  });
+                        match res {
+                            Ok(_) => (),
+                            Err(x) => error!("Error resampling audio: {}", x),
+                        }
                     });
                     if endut {
                         let loop_spot: f64 =
@@ -839,6 +951,20 @@ impl InternalState {
         }
         return 0.0
     }
+    fn reset_to_heard_point(&mut self) -> anyhow::Result<()> {
+        FRAME_QUEUE.lock().unwrap().clear();
+        let (cur_song, timestamp) = self.active_song.as_ref().map(|(x,y)| (x.clone(), *y)).ok_or_else(|| anyhow!("Resetting to heard point but there's no heard song?"))?;
+        if Some(&cur_song) != self.future_song.as_ref() {
+            self.future_song = Some(cur_song);
+            self.future_stream = None;
+        }
+        if self.check_stream().is_ok() {
+            if let Some(stream) = self.future_stream.as_mut() {
+                stream.seek_to_time(timestamp);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Returns whether mute is now active.
@@ -862,3 +988,4 @@ pub fn volume_to_db(level: i32) -> f64 {
     let asq = amplitude * amplitude;
     asq.log10() * 10.0
 }
+

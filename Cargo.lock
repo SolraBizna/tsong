@@ -759,6 +759,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "libsoxr"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e77da969845b0df2f92b495fd57ba162c2b32a1422583910b9a472a9bc200068"
+dependencies = [
+ "bitflags 1.2.1",
+ "libc",
+ "libsoxr-sys",
+ "pkg-config",
+]
+
+[[package]]
+name = "libsoxr-sys"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5464eec58fb13764162f808c4be973f52e19856027175ce3da5e4222bb448ab5"
+dependencies = [
+ "pkg-config",
+]
+
+[[package]]
 name = "libsqlite3-sys"
 version = "0.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1319,6 +1340,7 @@ dependencies = [
  "gtk",
  "lazy_static",
  "libc",
+ "libsoxr",
  "log",
  "lsx",
  "mlua",
