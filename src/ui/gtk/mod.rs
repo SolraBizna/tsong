@@ -1993,8 +1993,15 @@ pub fn go() {
         // Controller will hook itself in and keep track of its own lifetime
         let _ = Controller::new(application);
     });
-    // don't parse a command line, apparently? the documentation is fuzzy on
-    // what that would entail anyway...
+    #[cfg(not(target_os = "windows"))]
+    {
+        let argv: Vec<String> = std::env::args().collect();
+        application.run(&argv[..]);
+    }
+    // on Windows, don't parse a command line, because GTK+ just retrieves the
+    // application's command line via system call anyway, so that the calling
+    // app can't screw up Unicode handling... -_-
+    #[cfg(target_os = "windows")]
     application.run(&[]);
 }
 
