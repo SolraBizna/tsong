@@ -48,10 +48,8 @@ impl ResampleStateOptionImplHack for Option<ResampleState> {
                 if let Some(me) = self {
                     let mut buf = bufring::get_buf();
                     buf.resize(512, 0.0); // hopefully enough
-                    // TODO: when that issue is fixed, change here too
-                    let buf_len = buf.len();
                     let (_, out_floats) = me.soxr.process::<f32,f32>
-                        (None, &mut buf[..buf_len / me.channel_count as usize])?;
+                        (None, &mut buf[..])?;
                     buf.resize(out_floats * me.channel_count as usize, 0.0);
                     FRAME_QUEUE.lock().unwrap().push_back(AudioFrame {
                         song_id: frame.song_id,
@@ -79,19 +77,15 @@ impl ResampleStateOptionImplHack for Option<ResampleState> {
                 }
             }
             if let Some(me) = self {
-                // TODO: When issue #4 in libsoxr-rs is fixed, remove the hack
                 let mut buf = bufring::get_buf();
                 buf.resize((frame.data.len() as f64 * me.output_rate
                             / me.input_rate).ceil() as usize + 200, 0.0);
                 let mut rem = &frame.data[..];
                 let mut buf_pos = 0;
                 while rem.len() > 0 {
-                    let rem_len = rem.len();
                     let out = &mut buf[buf_pos..];
-                    let out_len = out.len();
                     let (in_frames, out_frames) = me.soxr.process
-                        (Some(&rem[..rem_len / me.channel_count as usize]),
-                         &mut out[..out_len / me.channel_count as usize])?;
+                        (Some(&rem[..]), &mut out[..])?;
                     let in_floats = in_frames * me.channel_count as usize;
                     let out_floats = out_frames * me.channel_count as usize;
                     rem = &rem[in_floats..];
