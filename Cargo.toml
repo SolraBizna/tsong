@@ -20,7 +20,7 @@ glib = ""
 gtk = {version = "0.9.0", features = ["v3_16"]}
 lazy_static = "1.4"
 libc = ""
-libsoxr = {path = "../libsoxr-rs"}
+libsoxr = "0.2.6"
 log = "0.4"
 lsx = {version = "1.1", default-features = false, features = ["sha256"]}
 mlua = {version = "0.4.2", features = ["lua54", "vendored"]}

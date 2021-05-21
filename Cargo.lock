@@ -775,7 +775,9 @@ dependencies = [
 
 [[package]]
 name = "libsoxr"
-version = "0.2.5"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19e77fa042fada8665479eccec19eb09a62e9d43dc0507f9aa10444ce92cc427"
 dependencies = [
  "bitflags 1.2.1",
  "libc",
