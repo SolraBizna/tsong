@@ -19,7 +19,7 @@ function string:unset(wat)
    return wat == "" or wat == "0"
 end
 
-metafetch = {any=true}
+metafetch = {tonumber=tonumber}
 
 local metafetch_mt = {}
 
