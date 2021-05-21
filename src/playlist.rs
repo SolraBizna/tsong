@@ -582,21 +582,24 @@ pub fn get_playlist_by_id(id: PlaylistID) -> Option<PlaylistRef> {
 
 fn delete_playlist_from(victim_ref: &PlaylistRef,
                         victim: &mut RwLockWriteGuard<Playlist>,
-                        siblings: &mut Vec<PlaylistRef>){
+                        siblings: &mut Vec<PlaylistRef>,
+                        rehome_children: bool){
     siblings.retain(|x| x != victim_ref);
     let mut next_order = if siblings.len() == 0 { 0 }
     else { siblings[siblings.len()-1].read().unwrap().parent_order + 1 };
-    for child_ref in victim.children.iter() {
-        if child_ref == victim_ref { continue } // be defensive
-        let mut child = child_ref.write().unwrap();
-        child.parent_id = victim.parent_id;
-        child.parent_order = next_order;
-        db::update_playlist_parent_id_and_order(child.id, child.parent_id,
-                                                child.parent_order);
-        siblings.push(child_ref.clone());
-        next_order += 1;
+    if rehome_children {
+        for child_ref in victim.children.iter() {
+            if child_ref == victim_ref { continue } // be defensive
+            let mut child = child_ref.write().unwrap();
+            child.parent_id = victim.parent_id;
+            child.parent_order = next_order;
+            db::update_playlist_parent_id_and_order(child.id, child.parent_id,
+                                                    child.parent_order);
+            siblings.push(child_ref.clone());
+            next_order += 1;
+        }
+        victim.children.clear(); // be tidy
     }
-    victim.children.clear(); // be tidy
 }
 
 /// Deletes a playlist from the database. Any children will be adopted by their
@@ -610,11 +613,13 @@ pub fn delete_playlist(victim_ref: PlaylistRef) {
             // Orphan or top-level playlist.
             let mut top_level_playlists = TOP_LEVEL_PLAYLISTS.write().unwrap();
             delete_playlist_from(&victim_ref, &mut victim,
-                                 &mut top_level_playlists);
+                                 &mut top_level_playlists,
+                                 true);
         },
         Some(parent) => {
             delete_playlist_from(&victim_ref, &mut victim,
-                                 &mut parent.write().unwrap().children);
+                                 &mut parent.write().unwrap().children,
+                                 true);
         },
     }
     victim.parent_id = None;
@@ -700,12 +705,14 @@ impl PlaylistRef {
                 None => {
                     // Orphan or top-level playlist.
                     delete_playlist_from(&self, &mut victim,
-                                         &mut top_level_playlists);
+                                         &mut top_level_playlists,
+                                         false);
                 },
                 Some(parent_ref) => {
                     delete_playlist_from(&self, &mut victim,
                                          &mut parent_ref.write().unwrap()
-                                         .children);
+                                         .children,
+                                         false);
                 },
         }
         victim.parent_id = parent_ref.as_ref().map(|x| x.read().unwrap().get_id());

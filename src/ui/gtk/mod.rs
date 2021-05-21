@@ -1389,23 +1389,51 @@ context.drag_finish(res.0, res.1, time);
         None
     }
     fn clicked_new_playlist(&mut self) -> Option<()> {
-        let playlist = match playlist::create_new_playlist() {
+        let selection = self.playlists_view.get_selection();
+        let (mut wo_list, model) = selection.get_selected_rows();
+        if wo_list.len() < 2 { wo_list.clear() }
+        let child_row_ref_list: Vec<TreeRowReference>
+            = wo_list.into_iter()
+            .filter_map(|x| TreeRowReference::new(&model, &x))
+            .collect();
+        let child_list: Vec<PlaylistRef>
+            = child_row_ref_list.iter()
+            .filter_map(|x| x.get_path()
+                        .and_then(|x| model.get_iter(&x))
+                        .map(|x| model.get_value
+                             (&x, PLAYLIST_ID_COLUMN as i32))
+                        .and_then(value_to_playlist_id)
+                        .and_then(playlist::get_playlist_by_id))
+            .collect();
+        assert_eq!(child_row_ref_list.len(), child_list.len());
+        let playlist_ref = match playlist::create_new_playlist() {
             Ok(x) => x,
             Err(x) => {
                 error!("Unable to create playlist: {:?}", x);
                 return None
             }
         };
-        let playlist = playlist.read().unwrap();
-        let id = playlist.get_id();
-        let playlists_model = &self.playlists_model;
-        let wo = 
-            playlists_model.insert_with_values(None, None, &[0, 1, 2],
-                                               &[&playlist_id_to_value(id),
-                                                 &playlist.get_name(),
-                                                 &INACTIVE_WEIGHT]);
-        drop(playlist);
-        match playlists_model.get_path(&wo) {
+        let id = playlist_ref.read().unwrap().get_id();
+        let mut expanded_playlist_ids = self.get_expanded_playlists();
+        expanded_playlist_ids.push(id);
+        for child_ref in child_list.iter() {
+            child_ref.move_next_to(Some(&playlist_ref), None);
+        }
+        for child_row_ref in child_row_ref_list.into_iter() {
+            if let Some(child_wo) = child_row_ref.get_path() {
+                let child_iter = model.get_iter(&child_wo).unwrap();
+                self.playlists_model.remove(&child_iter);
+            }
+        }
+        let mut our_new_path = Vec::with_capacity(1);
+        add_playlists_to_model(&self.playlists_model,
+                               &[playlist_ref.clone()],
+                               &mut our_new_path,
+                               None, &[playlist_ref],
+                               playback::get_future_playlist().as_ref());
+        self.expand_playlists(expanded_playlist_ids);
+        let iter = our_new_path.get(0).and_then(|x| model.get_iter(&x));
+        match iter.and_then(|x| self.playlists_model.get_path(&x)) {
             Some(path) => {
                 self.activate_playlist_by_path(&path);
                 self.playlists_view
@@ -1647,6 +1675,7 @@ context.drag_finish(res.0, res.1, time);
                 if playlist_ids[i] == id {
                     playlist_ids.remove(i);
                     self.playlists_view.expand_row(wo, false);
+                    break
                 }
             }
             playlist_ids.len() == 0
