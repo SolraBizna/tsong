@@ -549,7 +549,7 @@ impl Controller {
         self.meta_renames.clear();
         self.meta_edits.clear();
         let parent = self.parent.upgrade()?;
-        parent.try_borrow_mut().ok()?.closed_playlist_edit();
+        parent.try_borrow_mut().ok()?.closed_edit();
         None
     }
     pub fn show(&mut self) {

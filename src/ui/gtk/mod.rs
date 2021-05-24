@@ -68,7 +68,7 @@ use std::{
 use anyhow::anyhow;
 
 mod settings;
-mod playlist_edit;
+mod edit;
 mod errors_window;
 mod scrp;
 use scrp::*;
@@ -107,7 +107,7 @@ pub struct Controller {
     playlists_model: TreeStore,
     playlists_view: TreeView,
     playmode_button: ToggleButton,
-    playlist_edit_button: ToggleButton,
+    edit_button: ToggleButton,
     errors_button: ToggleButton,
     prev_button: Button,
     rollup_button: Button,
@@ -127,7 +127,7 @@ pub struct Controller {
     scan_thread: ScanThread,
     rolled_down_height: i32,
     settings_controller: Option<Rc<RefCell<settings::Controller>>>,
-    playlist_edit_controller: Option<Rc<RefCell<playlist_edit::Controller>>>,
+    edit_controller: Option<Rc<RefCell<edit::Controller>>>,
     errors_controller: Option<Rc<RefCell<errors_window::Controller>>>,
     periodic_timer: Option<SourceId>,
     volume_changed: bool,
@@ -325,11 +325,11 @@ impl Controller {
             .name("playmode").build();
         playlist_control_box.pack_start(&playmode_button, false, false, 0);
         // Button to edit playlist settings:
-        let playlist_edit_button = ToggleButtonBuilder::new()
+        let edit_button = ToggleButtonBuilder::new()
             .tooltip_text("Open a window where you can edit properties of \
                            this playlist, or of the selected song(s).")
             .name("edit_playlist").label("Edit").build();
-        playlist_control_box.pack_end(&playlist_edit_button, false, false, 0);
+        playlist_control_box.pack_end(&edit_button, false, false, 0);
         below_playlist_box.pack_start(&playlist_control_box, false, false, 0);
         rollup_grid.attach(&below_playlist_box, 2, 1, 1, 1);
         outer_box.add(&rollup_grid);
@@ -493,13 +493,13 @@ impl Controller {
             scan_spinner, scan_thread, rollup_grid, control_box,
             new_playlist_button, delete_playlist_button,
             playlist_name_column, playlist_name_cell, window,
-            playlist_edit_button, errors_button,
+            edit_button, errors_button,
             remote: None, remote_time: -1.0,
             last_active_playlist, last_active_song: None,
             active_playlist: None, playlist_generation: Default::default(),
             errors_generation: Default::default(), errors_controller: None,
             last_built_playlist: None, me: None, settings_controller: None,
-            playlist_edit_controller: None, rolled_down_height: 400,
+            edit_controller: None, rolled_down_height: 400,
             periodic_timer: None, volume_changed: false,
             song_meta_update_rx,
         }));
@@ -511,7 +511,7 @@ impl Controller {
         let mut this = nu.borrow_mut();
         this.me = Some(Rc::downgrade(&nu));
         this.settings_controller = Some(settings::Controller::new(Rc::downgrade(&nu)));
-        this.playlist_edit_controller = Some(playlist_edit::Controller::new(Rc::downgrade(&nu), song_meta_update_tx));
+        this.edit_controller = Some(edit::Controller::new(Rc::downgrade(&nu), song_meta_update_tx));
         this.errors_controller = Some(errors_window::Controller::new(Rc::downgrade(&nu)));
         this.remote = Some(Remote::new(Rc::downgrade(&nu)));
         this.delete_playlist_button
@@ -631,9 +631,9 @@ context.drag_finish(res.0, res.1, time);
                 .map(|mut x| x.clicked_errors());
         });
         let controller = nu.clone();
-        this.playlist_edit_button.connect_clicked(move |_| {
+        this.edit_button.connect_clicked(move |_| {
             let _ = controller.try_borrow_mut()
-                .map(|mut x| x.clicked_playlist_edit());
+                .map(|mut x| x.clicked_edit());
         });
         let controller = nu.clone();
         this.window.connect_key_press_event(move |window, evt| {
@@ -984,11 +984,11 @@ context.drag_finish(res.0, res.1, time);
         if Some(&playlist_ref) == self.active_playlist.as_ref() {
             return
         }
-        self.playlist_edit_controller.as_ref().unwrap().borrow_mut()
+        self.edit_controller.as_ref().unwrap().borrow_mut()
             .set_selected_songs(&[]);
         self.active_playlist = Some(playlist_ref.clone());
         let _ =
-            self.playlist_edit_controller.as_ref().unwrap().try_borrow_mut()
+            self.edit_controller.as_ref().unwrap().try_borrow_mut()
             .map(|mut x| x.activate_playlist(self.active_playlist.as_ref()
                                              .cloned()));
         self.playlist_generation.destroy();
@@ -1192,7 +1192,7 @@ context.drag_finish(res.0, res.1, time);
             },
         };
         scan_in_progress
-            || self.playlist_edit_controller.as_ref().unwrap().borrow()
+            || self.edit_controller.as_ref().unwrap().borrow()
             .script_is_in_progress()
     }
     fn update_scan_status(&mut self) {
@@ -1551,19 +1551,19 @@ context.drag_finish(res.0, res.1, time);
     fn closed_errors(&mut self) {
         self.errors_button.set_active(false);
     }
-    fn clicked_playlist_edit(&mut self) -> Option<()> {
-        if self.playlist_edit_button.get_active() {
-            self.playlist_edit_controller.as_ref().unwrap().try_borrow_mut()
+    fn clicked_edit(&mut self) -> Option<()> {
+        if self.edit_button.get_active() {
+            self.edit_controller.as_ref().unwrap().try_borrow_mut()
                 .ok()?.show();
         }
         else {
-            self.playlist_edit_controller.as_ref().unwrap().try_borrow_mut()
+            self.edit_controller.as_ref().unwrap().try_borrow_mut()
                 .ok()?.unshow();
         }
         None
     }
-    fn closed_playlist_edit(&mut self) {
-        self.playlist_edit_button.set_active(false);
+    fn closed_edit(&mut self) {
+        self.edit_button.set_active(false);
     }
     fn rescan(&mut self) {
         match self.scan_thread.rescan(prefs::get_music_paths()) {
@@ -1588,7 +1588,7 @@ context.drag_finish(res.0, res.1, time);
             .map(|iter| model.get_value(&iter, SONG_ID_COLUMN as i32))
             .filter_map(value_to_song_id)
             .collect();
-        self.playlist_edit_controller.as_ref().unwrap().borrow_mut()
+        self.edit_controller.as_ref().unwrap().borrow_mut()
             .set_selected_songs(&selected_songs[..]);
     }
     fn edit_playlist(&mut self, neu_code: String,
