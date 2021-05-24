@@ -46,7 +46,7 @@
 #scan_spinner {
     margin-left: 1em;
 }
-box#settings, window#editor box#buttons, notebook#editor > stack > box {
+box#settings, window#editor box#buttons, notebook#editor stack > box {
     margin: 4px 8px 4px 8px;
 }
 window#editor box#buttons {

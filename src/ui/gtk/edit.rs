@@ -79,8 +79,12 @@ pub struct Controller {
     reimport_selected_meta_button: Button,
     new_meta_button: Button,
     notebook: Notebook,
+    playlist_notebook: Notebook,
+    song_notebook: Notebook,
     columns_page: u32,
     meta_page: u32,
+    playlist_page: u32,
+    song_page: u32,
     playlist_code: Entry,
     apply_button: Button,
     cancel_button: Button,
@@ -125,11 +129,19 @@ impl Controller {
         let notebook = NotebookBuilder::new().name("editor")
             .show_border(false).build();
         big_box.add(&notebook);
+        let playlist_notebook = NotebookBuilder::new().name("playlist")
+            .show_border(false).build();
+        let playlist_page = notebook.append_page::<_, Widget>(&playlist_notebook, None);
+        notebook.set_tab_label_text(&playlist_notebook, "Playlist");
+        let song_notebook = NotebookBuilder::new().name("song")
+            .show_border(false).build();
+        let song_page = notebook.append_page::<_, Widget>(&song_notebook, None);
+        notebook.set_tab_label_text(&song_notebook, "Song");
         let columns_box = BoxBuilder::new()
             .name("playlist_columns")
             .orientation(Orientation::Vertical).spacing(4).build();
-        let columns_page = notebook.append_page::<_, Widget>(&columns_box, None);
-        notebook.set_tab_label_text(&columns_box, "Columns");
+        let columns_page = playlist_notebook.append_page::<_, Widget>(&columns_box, None);
+        playlist_notebook.set_tab_label_text(&columns_box, "Columns");
         let sort_box = BoxBuilder::new()
             .name("playlist_sort")
             .orientation(Orientation::Vertical).spacing(4).build();
@@ -137,18 +149,25 @@ impl Controller {
                                                  now, change the sort by \
                                                  clicking on the column \
                                                  headings.").build());
-        notebook.append_page::<_, Widget>(&sort_box, None);
-        notebook.set_tab_label_text(&sort_box, "Sort");
+        playlist_notebook.append_page::<_, Widget>(&sort_box, None);
+        playlist_notebook.set_tab_label_text(&sort_box, "Sort");
         let rule_box = BoxBuilder::new()
             .name("playlist_rules")
             .orientation(Orientation::Vertical).spacing(4).build();
-        notebook.append_page::<_, Widget>(&rule_box, None);
-        notebook.set_tab_label_text(&rule_box, "Rules");
+        playlist_notebook.append_page::<_, Widget>(&rule_box, None);
+        playlist_notebook.set_tab_label_text(&rule_box, "Rules");
         let meta_box = BoxBuilder::new()
             .name("song_meta")
             .orientation(Orientation::Vertical).spacing(4).build();
-        let meta_page = notebook.append_page::<_, Widget>(&meta_box, None);
-        notebook.set_tab_label_text(&meta_box, "Song Metadata");
+        let meta_page = song_notebook.append_page::<_, Widget>(&meta_box, None);
+        song_notebook.set_tab_label_text(&meta_box, "Metadata");
+        let files_box = BoxBuilder::new()
+            .name("files")
+            .orientation(Orientation::Vertical).spacing(4).build();
+        files_box.add(&LabelBuilder::new().label("Not implemented yet.")
+                      .build());
+        song_notebook.append_page::<_, Widget>(&files_box, None);
+        song_notebook.set_tab_label_text(&files_box, "Files");
         // The playlist code:
         // TODO: make this a monospace font?
         rule_box.add(&LabelBuilder::new()
@@ -316,7 +335,8 @@ impl Controller {
         buttons_box.pack_end(&button_box, false, true, 0);
         big_box.add(&buttons_box);
         let ret = Rc::new(RefCell::new(Controller {
-            window, notebook, columns_page, meta_page,
+            window, notebook, playlist_notebook, song_notebook,
+            columns_page, meta_page, song_page, playlist_page,
             parent, columns_model: ListStore::new(&[Type::String, Type::U32]),
             delete_column_button, new_column_button, column_tag_column,
             delete_meta_button, reimport_all_meta_button,
@@ -556,10 +576,12 @@ impl Controller {
         if !self.window.is_visible() {
             self.populate();
             if self.selected_songs.len() == 0 {
-                self.notebook.set_current_page(Some(self.columns_page));
+                self.notebook.set_current_page(Some(self.playlist_page));
+                self.playlist_notebook.set_current_page(Some(self.columns_page));
             }
             else {
-                self.notebook.set_current_page(Some(self.meta_page));
+                self.notebook.set_current_page(Some(self.song_page));
+                self.song_notebook.set_current_page(Some(self.meta_page));
             }
             self.window.show_all();
         }
