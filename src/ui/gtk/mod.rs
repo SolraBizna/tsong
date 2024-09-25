@@ -64,7 +64,7 @@ use std::{
     rc::{Rc,Weak},
     sync::{RwLockReadGuard, mpsc},
 };
-
+use lazy_static::lazy_static;
 use anyhow::anyhow;
 
 mod settings;
@@ -2115,6 +2115,9 @@ fn make_column_heading(orig: &str) -> String {
 
 const PLAYLIST_ID_TYPE: Type = Type::U64;
 const SONG_ID_TYPE: Type = Type::U64;
+lazy_static! {
+    static ref FILE_ID_TYPE: Type = glib::String::static_type();
+}
 
 fn playlist_id_to_value(id: PlaylistID) -> Value {
     id.as_inner().to_value()
@@ -2130,6 +2133,18 @@ fn song_id_to_value(id: SongID) -> Value {
 
 fn value_to_song_id(id: Value) -> Option<SongID> {
     id.get().ok().and_then(|x| x).map(SongID::from_inner)
+}
+
+fn file_id_to_value(id: &FileID) -> Value {
+    glib::String::new(id.as_bytes()).to_value()
+}
+
+fn value_to_file_id(id: Value) -> Option<FileID> {
+    id.get().ok().and_then(|x| x).and_then(|x: glib::String| {
+        if x.len() == physical::ID_SIZE {
+            FileID::from_bytes(&*x).ok()
+        } else { None }
+    })
 }
 
 fn add_playlists_to_model(playlists_model: &TreeStore,

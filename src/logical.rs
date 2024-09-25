@@ -188,7 +188,7 @@ pub fn incorporate_physical(file_ref: PhysicalFileRef) {
                                             .unwrap(),
                                             duration,
                                             &metadata);
-    let _ = INCORPORATION_LOCK.lock().unwrap();
+    let _lock = INCORPORATION_LOCK.lock().unwrap();
     // physical file already incorporated? if so, nothing to do
     if let Some(_) = SONGS_BY_FILE_ID.read().unwrap().get(file.get_id()) {
         info!("Same exact song! {:?}", metadata.get("title"));
@@ -360,6 +360,56 @@ impl LogicalSong {
             true
         }
         else { false }
+    }
+}
+
+impl Display for LogicalSong {
+    fn fmt(&self, fmt: &mut Formatter<'_>) -> fmt::Result {
+        let mut artist = self.user_metadata.get("artist");
+        let mut title = self.user_metadata.get("title");
+        if title.is_none() {
+            for rec in self.similarity_recs.iter() {
+                if let Some(nu) = rec.title.as_ref() {
+                    title = Some(nu);
+                    break;
+                }
+            }
+        }
+        if artist.is_none() {
+            for rec in self.similarity_recs.iter() {
+                if let Some(nu) = rec.artist.as_ref() {
+                    artist = Some(nu);
+                    break;
+                }
+            }
+        }
+        if title.is_none() && artist.is_none() {
+            write!(fmt, "Song ID #{}", self.id)?;
+            return Ok(())
+        }
+        else {
+            let trackno = self.user_metadata.get("track#");
+            if let Some(trackno) = trackno {
+                let discno = self.user_metadata.get("disc#");
+                match discno {
+                    Some(discno) => write!(fmt, "{}-{}{}. ", discno,
+                                           if trackno.len() == 1 { "0" }
+                                           else { "" },
+                                           trackno),
+                    None => write!(fmt, "{}. ", trackno),
+                }?;
+            }
+        }
+        match (title, artist) {
+            (Some(title), Some(artist)) =>
+                write!(fmt, "{}, by {}", title, artist)?,
+            (None, Some(artist)) =>
+                write!(fmt, "a song by {}", artist)?,
+            (Some(title), None) =>
+                write!(fmt, "{}", title)?,
+            _ => (),
+        }
+        Ok(())
     }
 }
 

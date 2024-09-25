@@ -1,5 +1,5 @@
 use crate::*;
-use log::{warn, error};
+use log::{warn, error, trace};
 use gtk::{
     prelude::*,
     Align,
@@ -9,6 +9,7 @@ use gtk::{
     ButtonsType,
     CellRendererText,
     CellRendererToggle,
+    DestDefaults,
     DialogFlags,
     Entry, EntryBuilder,
     LabelBuilder,
@@ -21,20 +22,31 @@ use gtk::{
     ScrolledWindowBuilder,
     SelectionMode,
     SeparatorBuilder,
+    TargetEntry, TargetFlags,
+    TreeStore,
     TreeView, TreeViewBuilder, TreeViewColumn, TreeIter, TreePath,
     TreeRowReference,
     Widget,
     Window, WindowBuilder, WindowType,
 };
 use glib::{
-    Type
+    Type,
 };
+use gdk::{
+    DragAction,
+    ModifierType,
+};
+use lazy_static::lazy_static;
 use std::{
     collections::{BTreeMap, HashMap},
     cell::RefCell,
+    fmt::Write,
     rc::{Rc, Weak},
     sync::{Arc, atomic::{AtomicBool, Ordering}, mpsc},
 };
+
+const TSONG_FILE_MIMETYPE: &str = "application/x-os-path";
+const TSONG_FILE_TYPE: u32 = 3;
 
 // TODO: this should be fluent...
 const PLAYLIST_CODE_TOOLTIP: &str =
@@ -59,6 +71,8 @@ pub struct Controller {
     new_column_button: Button,
     metadata_model: ListStore,
     metadata_view: TreeView,
+    files_model: TreeStore,
+    files_view: TreeView,
     meta_key_cell: CellRendererText,
     meta_key_column: TreeViewColumn,
     meta_value_cell: CellRendererText,
@@ -106,6 +120,18 @@ const META_ROW_WEIGHT_COLUMN: u32 = 2;
 const META_MODIFIED_COLUMN: u32 = 3;
 const META_ORIG_KEY_COLUMN: u32 = 4;
 const META_DELETED_COLUMN: u32 = 5;
+
+lazy_static! {
+    static ref FILES_COLUMN_TYPES: [Type; 5]
+        = [Type::String, Type::Bool, Type::Bool,
+           super::SONG_ID_TYPE,
+           *super::FILE_ID_TYPE];
+}
+const FILE_NAME_COLUMN: u32 = 0;
+const FILE_IS_ACTUALLY_CHECKBOX_COLUMN: u32 = 1;
+const FILE_IS_SENSITIVE_COLUMN: u32 = 2;
+const FILE_SONG_ID_COLUMN: u32 = 3;
+const FILE_FILE_ID_COLUMN: u32 = 4;
 
 // TODO: i18n
 const MULTIPLE_VALUES: &str = "(multiple values)";
@@ -164,8 +190,6 @@ impl Controller {
         let files_box = BoxBuilder::new()
             .name("files")
             .orientation(Orientation::Vertical).spacing(4).build();
-        files_box.add(&LabelBuilder::new().label("Not implemented yet.")
-                      .build());
         song_notebook.append_page::<_, Widget>(&files_box, None);
         song_notebook.set_tab_label_text(&files_box, "Files");
         // The playlist code:
@@ -306,6 +330,58 @@ impl Controller {
         metadata_button_box.add(&new_meta_button);
         meta_box.add(&metadata_button_box);
         super::set_icon(&new_meta_button, "tsong-add");
+        // Song files
+        let files_model = TreeStore::new(&FILES_COLUMN_TYPES[..]);
+        let files_window = ScrolledWindowBuilder::new()
+            .name("files")
+            .hscrollbar_policy(PolicyType::Automatic)
+            .vscrollbar_policy(PolicyType::Automatic)
+            .vexpand(true)
+            .build();
+        let files_view = TreeViewBuilder::new()
+            .headers_visible(false)
+            .model(&files_model).build();
+        let tvc = TreeViewColumn::new();
+        let import_metadata_cell = CellRendererToggle::new();
+        import_metadata_cell.set_alignment(0.5, 0.5);
+        tvc.pack_start(&import_metadata_cell, true);
+        tvc.add_attribute(&import_metadata_cell, "visible", FILE_IS_ACTUALLY_CHECKBOX_COLUMN as i32);
+        tvc.add_attribute(&import_metadata_cell, "sensitive", FILE_IS_SENSITIVE_COLUMN as i32);
+        let name_or_path_cell = CellRendererText::new();
+        tvc.pack_start(&name_or_path_cell, true);
+        tvc.add_attribute(&name_or_path_cell, "text", FILE_NAME_COLUMN as i32);
+        tvc.add_attribute(&name_or_path_cell, "sensitive", FILE_IS_SENSITIVE_COLUMN as i32);
+        files_view.append_column(&tvc);
+        let file_type = TargetEntry::new(TSONG_FILE_MIMETYPE,
+                                         TargetFlags::SAME_APP
+                                         | TargetFlags::SAME_WIDGET,
+                                         TSONG_FILE_TYPE);
+        files_view.drag_source_set(ModifierType::BUTTON1_MASK,
+                                   &[file_type.clone()],
+                                   DragAction::MOVE);
+        files_view.drag_dest_set(DestDefaults::empty(),
+                                 &[file_type.clone()],
+                                 DragAction::MOVE);
+        files_view.connect_drag_begin(|_widget, context| {
+            trace!("files_view begins drag");
+            context.drag_set_icon_name("tsong-dragged-file", 0, 0);
+        });
+        files_view.connect_drag_end(|_widget, _context| {
+            trace!("files_view ends drag");
+        });
+        files_view.connect_drag_failed(|_widget, _context, why| {
+            trace!("files_view failed drag ({:?})", why);
+            Inhibit(false)
+        });
+        files_view.get_selection()
+            .set_select_function(Some(Box::new(|_selection, _model, path, selected| {
+                // Something that's selected can always be deselected.
+                if selected { return true }
+                // Only files can be selected.
+                else { return path.get_depth() > 1 }
+            })));
+        files_window.add(&files_view);
+        files_box.add(&files_window);
         // The buttons
         big_box.pack_start(&SeparatorBuilder::new()
                            .orientation(Orientation::Horizontal)
@@ -347,7 +423,7 @@ impl Controller {
             meta_orig: BTreeMap::new(),
             meta_edits: BTreeMap::new(), meta_renames: BTreeMap::new(),
             column_tag_cell, playlist_code, active_playlist: None,
-            metadata_model, metadata_view,
+            metadata_model, metadata_view, files_model, files_view,
             script_in_progress: Arc::new(AtomicBool::new(false)),
             selected_songs: Vec::new(), me: None,
             song_meta_update_tx,
@@ -549,7 +625,7 @@ impl Controller {
         // This will get called automatically when the main UI notices we've
         // changed some metadata. Bonus: It won't if we've been called by
         // clicking "Save & Close" and our window got closed!
-        //self.populate_meta();
+        //self.populate_song();
         None
     }
     fn clicked_cancel(&mut self) {
@@ -564,6 +640,7 @@ impl Controller {
     fn cleanup(&mut self) -> Option<()> {
         self.columns_model.clear();
         self.metadata_model.clear();
+        self.files_model.clear();
         self.playlist_code.set_text("");
         self.meta_orig.clear();
         self.meta_renames.clear();
@@ -577,12 +654,12 @@ impl Controller {
             self.populate();
             if self.selected_songs.len() == 0 {
                 self.notebook.set_current_page(Some(self.playlist_page));
-                self.playlist_notebook.set_current_page(Some(self.columns_page));
             }
             else {
                 self.notebook.set_current_page(Some(self.song_page));
-                self.song_notebook.set_current_page(Some(self.meta_page));
             }
+            self.playlist_notebook.set_current_page(Some(self.columns_page));
+            self.song_notebook.set_current_page(Some(self.meta_page));
             self.window.show_all();
         }
         else {
@@ -605,7 +682,7 @@ impl Controller {
             logical::get_song_by_song_id(*song_id)
                 .map(|x| self.selected_songs.push(x));
         }
-        if self.window.is_visible() { self.populate_meta() }
+        if self.window.is_visible() { self.populate_song() }
         self.reimport_all_meta_button.set_sensitive(self.selected_songs.len() !=0);
         self.new_meta_button.set_sensitive(self.selected_songs.len() != 0);
         //self.meta_script_button.set_sensitive(self.selected_songs.len() != 0);
@@ -625,10 +702,11 @@ impl Controller {
                                                     &column.width.to_value()]);
         }
         drop(playlist);
-        self.populate_meta();
+        self.populate_song();
     }
-    fn populate_meta(&mut self) {
+    fn populate_song(&mut self) {
         self.metadata_model.clear();
+        self.files_model.clear();
         self.meta_orig.clear();
         self.meta_renames.clear();
         self.meta_edits.clear();
@@ -653,6 +731,44 @@ impl Controller {
                         }
                     },
                 }
+            }
+            // while we're here, populate the files table!
+            let song_id = song.get_id();
+            let song_id_value = super::song_id_to_value(song_id);
+            let song_iter = self.files_model.insert_with_values
+                (None, None,
+                 &[FILE_NAME_COLUMN, FILE_IS_SENSITIVE_COLUMN,
+                   FILE_SONG_ID_COLUMN],
+                 &[&format!("{}", *song), &false, &song_id_value]);
+            let files = song.get_physical_files();
+            for file_id in files {
+                let mut name = String::new();
+                match physical::get_file_by_id(file_id) {
+                    None => write!(name, "MISSING FILE").unwrap(),
+                    Some(file_ref) => {
+                        let file = file_ref.read().unwrap();
+                        let paths = file.get_absolute_paths();
+                        if paths.len() > 0 {
+                            for path in paths {
+                                write!(name, "{}\n",
+                                       path.to_string_lossy()).unwrap();
+                            }
+                            name.pop(); // pop off trailing \n
+                        }
+                        else {
+                            write!(name, "<{}>", file_id).unwrap();
+                        }
+                    },
+                }
+                self.files_model.insert_with_values
+                    (Some(&song_iter), None,
+                     &[FILE_NAME_COLUMN,
+                       FILE_IS_SENSITIVE_COLUMN,
+                       FILE_SONG_ID_COLUMN,
+                       FILE_FILE_ID_COLUMN],
+                     &[&name,
+                       &true, &song_id_value,
+                       &super::file_id_to_value(file_id)]);
             }
         }
         for song_ref in self.selected_songs.iter() {
